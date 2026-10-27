@@ -369,8 +369,8 @@ SK_TLS_Bottom (void) noexcept
   // ----------- Fast Path ------------
 #endif
 
-  InterlockedIncrement (&_SK_IgnoreTLSAlloc);
-
+  // SK_GetTLS (...) guards its own allocation, the counter only needs to be
+  //   held while inserting into the TLS map (once per-thread)
   auto pTLSRecord =
     SK_GetTLS (&pTLS);
 
@@ -380,6 +380,8 @@ SK_TLS_Bottom (void) noexcept
   {
     if (ReadAcquire (&_SK_IgnoreTLSMap) == 0)
     {
+      InterlockedIncrement (&_SK_IgnoreTLSAlloc);
+
       try
       {
         auto& tls_map =
@@ -392,10 +394,10 @@ SK_TLS_Bottom (void) noexcept
       }
 
       catch (...) {}
+
+      InterlockedDecrement (&_SK_IgnoreTLSAlloc);
     }
   }
-
-  InterlockedDecrement (&_SK_IgnoreTLSAlloc);
 
   if (pTLSRecord == nullptr)
   {

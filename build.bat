@@ -7,10 +7,11 @@ set __SK_PAUSE_SUCCESS=0
 set __SK_VS_PRERELEASE=0
 
 @REM Call the VS Developer Command Prompt if not already done
+@REM   (-products * is needed for vswhere to find standalone Build Tools)
 IF NOT DEFINED VSCMD_VER (
   IF %__SK_VS_PRERELEASE% EQU 1 (
     @REM Use prerelease version
-    FOR /f "usebackq delims=" %%i IN (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -prerelease -latest -property installationPath`) DO (
+    FOR /f "usebackq delims=" %%i IN (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -products * -prerelease -latest -property installationPath`) DO (
       IF EXIST "%%i\Common7\Tools\vsdevcmd.bat" (
         call "%%i\Common7\Tools\vsdevcmd.bat"
         goto :sk_continue
@@ -18,7 +19,7 @@ IF NOT DEFINED VSCMD_VER (
     )
   ) ELSE (
     @REM Use latest version
-    FOR /f "usebackq delims=" %%i IN (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) DO (
+    FOR /f "usebackq delims=" %%i IN (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -products * -latest -property installationPath`) DO (
       IF EXIST "%%i\Common7\Tools\vsdevcmd.bat" (
         call "%%i\Common7\Tools\vsdevcmd.bat"
         goto :sk_continue
@@ -31,6 +32,7 @@ IF NOT DEFINED VSCMD_VER (
 @REM Build Special K
 cd /D "%~dp0"
 call "%~dp0buildx86.bat"
+IF %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
 call "%~dp0buildx64.bat"
 
 @REM Post-build tasks

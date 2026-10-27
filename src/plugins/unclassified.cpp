@@ -1503,8 +1503,13 @@ SK_AMD_MWAITX (INT64 qpcTarget = 0)
 
   static alignas(64) uint64_t monitor = 0ULL;
 
+  // MWAITX's timer is 32-bit, compute in 64-bit and clamp to avoid wrapping
+  const DWORD dwTscTicks = (qpcTarget > 0) ?
+    static_cast <DWORD> (std::min <uint64_t> (static_cast <uint64_t> (qpcTarget) * SK_PerfFreqInTsc + 1, UINT32_MAX))
+                                           : SK_PerfFreqInTsc;
+
   _mm_monitorx (&monitor, 0, 0);
-  _mm_mwaitx   (0x2, 0, (qpcTarget > 0) ? ((DWORD)qpcTarget * SK_PerfFreqInTsc + 1) : SK_PerfFreqInTsc);
+  _mm_mwaitx   (0x2, 0, dwTscTicks);
 }
 
 bool

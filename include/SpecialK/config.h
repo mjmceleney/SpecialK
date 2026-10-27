@@ -231,6 +231,20 @@ struct sk_config_t
           SK_CPU_HasMWAITX =
       SK_CPU_TestForMWAITX ();
 
+#ifndef SK_BUILT_BY_CLANG
+    ZeroMemory (cpuid, sizeof (int) * 4);
+
+    __cpuid (cpuid, 0x0);
+
+    if (cpuid [0] >= 0x7)
+    {
+      __cpuidex (cpuid, 0x7, 0x0);
+
+      // WAITPKG (TPAUSE / UMWAIT) = ECX Bit 5 (0000_0007h)
+      SK_CPU_HasWAITPKG = (cpuid [2] & (1 << 5)) != 0;
+    }
+#endif
+
     SK_PerfTicksPerMs = SK_PerfFreq / 1000LL;
 
     if (! SK_GetHostAppUtil ()->isBlacklisted ())
@@ -833,6 +847,8 @@ struct sk_config_t
           float percent            =  0.5f;
         } auto_bias_target;
         bool  skip_frames          =   true;
+        bool  phase_lock           =   true; // Continuously track refresh phase
+        bool  pi_auto_bias         =   true; // PI controller for auto-bias
         bool  show_fcat_bars       =  false; // Not INI-persistent
 
         bool  flush_before_present  =  true;
@@ -842,6 +858,8 @@ struct sk_config_t
         bool  finish_after_present  =  true;
       } latent_sync;
       bool    use_amd_mwaitx       =   true;
+      bool    use_intel_tpause     =  false;
+      bool    adaptive_busy_wait   =   true; // Size busy-wait from measured timer error
       struct streamline_s {
         bool  enable_native_limit  =   true;
         float target_fps           =   0.0f;

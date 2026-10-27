@@ -115,8 +115,10 @@ public:
     }
 
   };
-  int hooked  (int whacks = 1) noexcept { return ( dwHookCalls    += whacks ); };
-  int wrapped (int whacks = 1) noexcept { return ( dwWrappedCalls += whacks ); };
+  // Once a verdict is reached the tallies are never read again, stop writing
+  //   to them so every draw call on every thread is not dirtying this memory.
+  int hooked  (int whacks = 1) noexcept { return whack != 0 ? dwHookCalls    : ( dwHookCalls    += whacks ); };
+  int wrapped (int whacks = 1) noexcept { return whack != 0 ? dwWrappedCalls : ( dwWrappedCalls += whacks ); };
 
 // Call tallys
 protected:
@@ -130,50 +132,9 @@ protected:
 #define SK_WRAP_AND_HOOK                                  \
   static SK_D3D11_HookTallyWhacker                        \
                  call_tally;                              \
-  /* Ugly caching mechanism, but effective. */            \
-  static std::pair<ID3D11DeviceContext*,bool>             \
-                                      _lastDeferredCheck0;\
-  static std::pair<ID3D11DeviceContext*,bool>             \
-                                      _lastDeferredCheck1;\
-  static std::pair<ID3D11DeviceContext*,bool>             \
-                                      _lastDeferredCheck2;\
-  static std::pair<ID3D11DeviceContext*,bool>             \
-                                      _lastDeferredCheck3;\
-  static std::pair<ID3D11DeviceContext*,bool>             \
-                                      _lastDeferredCheck4;\
-  static std::pair<ID3D11DeviceContext*,bool>             \
-                                      _lastDeferredCheck5;\
-  static std::pair<ID3D11DeviceContext*,bool>             \
-                                      _lastDeferredCheck6;\
-  static std::pair<ID3D11DeviceContext*,bool>             \
-                                      _lastDeferredCheck7;\
-  static std::pair<ID3D11DeviceContext*,bool>*            \
-    _pLastDeferredCheck        = &_lastDeferredCheck0;    \
                                                           \
-  const bool bIsLastDevCtx     =                          \
-    _pLastDeferredCheck->first == pDevCtx;                \
-  const bool bIsDevCtxDeferred = bIsLastDevCtx ?          \
-    _pLastDeferredCheck->second                :          \
+  const bool bIsDevCtxDeferred =                          \
     SK_D3D11_IsDevCtxDeferred (pDevCtx);                  \
-                                                          \
-    _pLastDeferredCheck->second = bIsDevCtxDeferred;      \
-    _pLastDeferredCheck->first  = pDevCtx;                \
-                                                          \
-    if (      _pLastDeferredCheck == &_lastDeferredCheck0)\
-              _pLastDeferredCheck  = &_lastDeferredCheck1;\
-    else if ( _pLastDeferredCheck == &_lastDeferredCheck1)\
-              _pLastDeferredCheck  = &_lastDeferredCheck2;\
-    else if ( _pLastDeferredCheck == &_lastDeferredCheck2)\
-              _pLastDeferredCheck  = &_lastDeferredCheck3;\
-    else if ( _pLastDeferredCheck == &_lastDeferredCheck3)\
-              _pLastDeferredCheck  = &_lastDeferredCheck4;\
-    else if ( _pLastDeferredCheck == &_lastDeferredCheck4)\
-              _pLastDeferredCheck  = &_lastDeferredCheck5;\
-    else if ( _pLastDeferredCheck == &_lastDeferredCheck5)\
-              _pLastDeferredCheck  = &_lastDeferredCheck6;\
-    else if ( _pLastDeferredCheck == &_lastDeferredCheck6)\
-              _pLastDeferredCheck  = &_lastDeferredCheck7;\
-    else      _pLastDeferredCheck  = &_lastDeferredCheck0;\
                                                           \
   bool bMustNotIgnore =                                   \
     true;                                                 \
@@ -195,51 +156,20 @@ __forceinline
 bool
 SK_D3D11_IsDevCtxDeferred (ID3D11DeviceContext* ctx)
 {
-  // Ugly caching mechanism, but effective.
-  static std::pair<ID3D11DeviceContext*,bool>
-                                      _lastDeferredCheck0;
-  static std::pair<ID3D11DeviceContext*,bool>
-                                      _lastDeferredCheck1;
-  static std::pair<ID3D11DeviceContext*,bool>
-                                      _lastDeferredCheck2;
-  static std::pair<ID3D11DeviceContext*,bool>
-                                      _lastDeferredCheck3;
-  static std::pair<ID3D11DeviceContext*,bool>
-                                      _lastDeferredCheck4;
-  static std::pair<ID3D11DeviceContext*,bool>
-                                      _lastDeferredCheck5;
-  static std::pair<ID3D11DeviceContext*,bool>
-                                      _lastDeferredCheck6;
-  static std::pair<ID3D11DeviceContext*,bool>
-                                      _lastDeferredCheck7;
-  static std::pair<ID3D11DeviceContext*,bool>*
-    _pLastDeferredCheck        = &_lastDeferredCheck0;
+  // Per-thread, so that draw calls on different threads do not write to
+  //   (and contend for) the same memory.
+  static thread_local ID3D11DeviceContext* pLastCtx       = nullptr;
+  static thread_local bool                 bLastDeferred  = false;
 
-  const bool bIsLastDevCtx     =
-    _pLastDeferredCheck->first == ctx;
-  const bool bIsDevCtxDeferred = bIsLastDevCtx ?
-    _pLastDeferredCheck->second                :
+  if (ctx == pLastCtx)
+    return bLastDeferred;
+
+  const bool bIsDevCtxDeferred =
     ctx             != nullptr &&
     ctx->GetType () == D3D11_DEVICE_CONTEXT_DEFERRED;
 
-  _pLastDeferredCheck->second = bIsDevCtxDeferred;
-  _pLastDeferredCheck->first  = ctx;
-
-    if (      _pLastDeferredCheck == &_lastDeferredCheck0)
-              _pLastDeferredCheck  = &_lastDeferredCheck1;
-    else if ( _pLastDeferredCheck == &_lastDeferredCheck1)
-              _pLastDeferredCheck  = &_lastDeferredCheck2;
-    else if ( _pLastDeferredCheck == &_lastDeferredCheck2)
-              _pLastDeferredCheck  = &_lastDeferredCheck3;
-    else if ( _pLastDeferredCheck == &_lastDeferredCheck3)
-              _pLastDeferredCheck  = &_lastDeferredCheck4;
-    else if ( _pLastDeferredCheck == &_lastDeferredCheck4)
-              _pLastDeferredCheck  = &_lastDeferredCheck5;
-    else if ( _pLastDeferredCheck == &_lastDeferredCheck5)
-              _pLastDeferredCheck  = &_lastDeferredCheck6;
-    else if ( _pLastDeferredCheck == &_lastDeferredCheck6)
-              _pLastDeferredCheck  = &_lastDeferredCheck7;
-    else      _pLastDeferredCheck  = &_lastDeferredCheck0;
+  pLastCtx      = ctx;
+  bLastDeferred = bIsDevCtxDeferred;
 
   return bIsDevCtxDeferred;
 }
@@ -262,41 +192,34 @@ SK_D3D11_IgnoreWrappedOrDeferred ( bool                 bWrapped,
       return true;
   }
 
-  // Ugly caching mechanism, but effective.
-  static std::pair<ID3D11DeviceContext*,bool>  _lastVerdict0;
-  static std::pair<ID3D11DeviceContext*,bool>  _lastVerdict1;
-  static std::pair<ID3D11DeviceContext*,bool>  _lastVerdict2;
-  static std::pair<ID3D11DeviceContext*,bool>  _lastVerdict3;
-  static std::pair<ID3D11DeviceContext*,bool>  _lastVerdict4;
-  static std::pair<ID3D11DeviceContext*,bool>  _lastVerdict5;
-  static std::pair<ID3D11DeviceContext*,bool>  _lastVerdict6;
-  static std::pair<ID3D11DeviceContext*,bool>  _lastVerdict7;
-  static std::pair<ID3D11DeviceContext*,bool>* _pLastVerdict = &_lastVerdict0;
+  // Per-thread cache of recent verdicts; the wrapped and unwrapped paths
+  //   below reach different verdicts, so both are part of the key.
+  struct verdict_s {
+    ID3D11DeviceContext* first    = nullptr;
+    bool                 second   = false;
+    bool                 bWrapped = false;
+  };
 
-  std::pair<ID3D11DeviceContext*,bool>* pLastVerdict = _pLastVerdict;
+  static constexpr UINT              _MaxVerdicts = 4;
+  static thread_local verdict_s      _lastVerdicts [_MaxVerdicts];
+  static thread_local UINT           _nextVerdict  = 0;
 
-  if (     pLastVerdict->first == pDevCtx)
-    return pLastVerdict->second;
-  else
+  for ( auto& verdict : _lastVerdicts )
   {
-    if (      _pLastVerdict == &_lastVerdict0)
-              _pLastVerdict  = &_lastVerdict1;
-    else if ( _pLastVerdict == &_lastVerdict1)
-              _pLastVerdict  = &_lastVerdict2;
-    else if ( _pLastVerdict == &_lastVerdict2)
-              _pLastVerdict  = &_lastVerdict3;
-    else if ( _pLastVerdict == &_lastVerdict3)
-              _pLastVerdict  = &_lastVerdict4;
-    else if ( _pLastVerdict == &_lastVerdict4)
-              _pLastVerdict  = &_lastVerdict5;
-    else if ( _pLastVerdict == &_lastVerdict5)
-              _pLastVerdict  = &_lastVerdict6;
-    else if ( _pLastVerdict == &_lastVerdict6)
-              _pLastVerdict  = &_lastVerdict7;
-    else      _pLastVerdict  = &_lastVerdict0;
-
-    pLastVerdict = _pLastVerdict;
+    if ( verdict.first    == pDevCtx &&
+         verdict.bWrapped == bWrapped )
+      return verdict.second;
   }
+
+  verdict_s* pLastVerdict =
+    &_lastVerdicts [_nextVerdict];
+
+  _nextVerdict =
+    (_nextVerdict + 1) % _MaxVerdicts;
+
+  // Not valid until a verdict is stored below
+  pLastVerdict->first    = nullptr;
+  pLastVerdict->bWrapped = bWrapped;
 
   SK_RenderBackend& rb =
     SK_GetCurrentRenderBackend ();
@@ -321,9 +244,9 @@ SK_D3D11_IgnoreWrappedOrDeferred ( bool                 bWrapped,
 
 #if 1
     // Ugly, but effective, optimization
-           ID3D11Device*        pDev        = nullptr;
-    static ID3D11Device*        pLastDev    = nullptr;
-    static ID3D11DeviceContext* pLastDevCtx = nullptr;
+                        ID3D11Device*        pDev        = nullptr;
+    static thread_local ID3D11Device*        pLastDev    = nullptr;
+    static thread_local ID3D11DeviceContext* pLastDevCtx = nullptr;
 
     if (pLastDevCtx == pDevCtx)
             pDev = pLastDev;
@@ -374,9 +297,9 @@ SK_D3D11_IgnoreWrappedOrDeferred ( bool                 bWrapped,
   if (rb.api != SK_RenderAPI::D3D11)
   {
 #if 1
-           ID3D11Device*        pDev        = nullptr;
-    static ID3D11Device*        pLastDev    = nullptr;
-    static ID3D11DeviceContext* pLastDevCtx = nullptr;
+                        ID3D11Device*        pDev        = nullptr;
+    static thread_local ID3D11Device*        pLastDev    = nullptr;
+    static thread_local ID3D11DeviceContext* pLastDevCtx = nullptr;
 
     if (pLastDevCtx == pDevCtx)
             pDev = pLastDev;

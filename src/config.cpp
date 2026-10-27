@@ -1000,6 +1000,8 @@ struct {
     sk::ParameterBool*    auto_low_latency_reapply= nullptr;
     sk::ParameterBool*    enable_etw_tracing      = nullptr;
     sk::ParameterBool*    use_amd_mwaitx          = nullptr;
+    sk::ParameterBool*    use_intel_tpause        = nullptr;
+    sk::ParameterBool*    adaptive_busy_wait      = nullptr;
     sk::ParameterBool*    apply_streamline_pacing = nullptr;
     sk::ParameterInt*     streamline_pacing_mode  = nullptr;
     sk::ParameterBool*    ignore_environment_vars = nullptr;
@@ -1032,6 +1034,8 @@ struct {
       sk::ParameterFloat*   max_auto_bias         = nullptr;
       sk::ParameterStringW* auto_bias_target      = nullptr;
       sk::ParameterBool*    skip_frames           = nullptr;
+      sk::ParameterBool*    phase_lock            = nullptr;
+      sk::ParameterBool*    pi_auto_bias          = nullptr;
     } latent_sync;
   } framerate;
 
@@ -2146,6 +2150,8 @@ auto DeclKeybind =
     ConfigEntry (render.framerate.enforcement_policy,    L"Place Framerate Limiter Wait Before/After Present, etc.",   dll_ini,         L"Render.FrameRate",      L"LimitEnforcementPolicy"),
     ConfigEntry (render.framerate.enable_etw_tracing,    L"Use ETW tracing (PresentMon) for extra latency/flip info",  dll_ini,         L"Render.FrameRate",      L"EnableETWTracing"),
     ConfigEntry (render.framerate.use_amd_mwaitx,        L"Use AMD Power-Saving Instructions for Busy-Wait",           dll_ini,         L"Render.FrameRate",      L"UseAMDMWAITX"),
+    ConfigEntry (render.framerate.use_intel_tpause,      L"Use Intel Power-Saving Instructions for Busy-Wait",         dll_ini,         L"Render.FrameRate",      L"UseIntelTPAUSE"),
+    ConfigEntry (render.framerate.adaptive_busy_wait,    L"Size Busy-Wait Using Measured Timer Accuracy",              dll_ini,         L"Render.FrameRate",      L"AdaptiveBusyWait"),
     ConfigEntry (render.framerate.
                                 apply_streamline_pacing, L"Apply Pacing to Native frames when using DLSS Frame Gen.",  dll_ini,         L"Render.FrameRate",      L"EnableStreamlinePacing"),
     ConfigEntry (render.framerate.
@@ -2174,6 +2180,10 @@ auto DeclKeybind =
                                           max_auto_bias, L"Maximum percentage to bias towards low input latency",      dll_ini,         L"FrameRate.LatentSync",  L"MaxAutoBias"),
     ConfigEntry (render.framerate.latent_sync.
                                             skip_frames, L"Enable __SK_LatentSyncSkip in 2x.. mode",                   dll_ini,         L"FrameRate.LatentSync",  L"SkipFrames"),
+    ConfigEntry (render.framerate.latent_sync.
+                                             phase_lock, L"Continuously Track Refresh Phase Instead of Periodic Resync",dll_ini,         L"FrameRate.LatentSync",  L"PhaseLock"),
+    ConfigEntry (render.framerate.latent_sync.
+                                           pi_auto_bias, L"Use a PI Controller for Auto Bias",                         dll_ini,         L"FrameRate.LatentSync",  L"PIAutoBias"),
 
     ConfigEntry (render.framerate.force_vk_mailbox,      L"Force Vulkan to use Mailbox Presentation Mode",             dll_ini,         L"Render.Vulkan",         L"ForceMailboxPresent"),
     ConfigEntry (render.framerate.force_vk_adaptive,     L"Force Vulkan to use FIFO Relaxed Presentation Mode",        dll_ini,         L"Render.Vulkan",         L"ForceAdaptiveVSYNC"),
@@ -5056,6 +5066,8 @@ auto DeclKeybind =
   render.framerate.sleepless_window->load     (config.render.framerate.sleepless_window);
   render.framerate.enable_mmcss->load         (config.render.framerate.enable_mmcss);
   render.framerate.use_amd_mwaitx->load       (config.render.framerate.use_amd_mwaitx);
+  render.framerate.use_intel_tpause->load     (config.render.framerate.use_intel_tpause);
+  render.framerate.adaptive_busy_wait->load   (config.render.framerate.adaptive_busy_wait);
   render.framerate.apply_streamline_pacing->
                                          load (config.render.framerate.streamline.enable_native_limit);
   render.framerate.streamline_pacing_mode->
@@ -5090,6 +5102,9 @@ auto DeclKeybind =
 
   if (! SK_CPU_HasMWAITX) // Turn off if CPU does not support
     config.render.framerate.use_amd_mwaitx = false;
+
+  if (! SK_CPU_HasWAITPKG)
+    config.render.framerate.use_intel_tpause = false;
 
   __target_fps_now = config.render.framerate.target_fps;
   __target_fps_bg  = config.render.framerate.target_fps_bg;
@@ -5131,6 +5146,10 @@ auto DeclKeybind =
 
   render.framerate.latent_sync.skip_frames
                                       ->load (config.render.framerate.latent_sync.skip_frames);
+  render.framerate.latent_sync.phase_lock
+                                      ->load (config.render.framerate.latent_sync.phase_lock);
+  render.framerate.latent_sync.pi_auto_bias
+                                      ->load (config.render.framerate.latent_sync.pi_auto_bias);
 
   render.osd.draw_in_vidcap->load            (config.render.osd. draw_in_vidcap);
 
@@ -7490,6 +7509,8 @@ SK_SaveConfig ( std::wstring name,
   render.framerate.sleepless_window->store   (config.render.framerate.sleepless_window);
   render.framerate.enable_mmcss->store       (config.render.framerate.enable_mmcss);
   render.framerate.use_amd_mwaitx->store     (config.render.framerate.use_amd_mwaitx);
+  render.framerate.use_intel_tpause->store   (config.render.framerate.use_intel_tpause);
+  render.framerate.adaptive_busy_wait->store (config.render.framerate.adaptive_busy_wait);
 
   render.framerate.apply_streamline_pacing->
                                        store (config.render.framerate.streamline.enable_native_limit);
@@ -7588,7 +7609,9 @@ SK_SaveConfig ( std::wstring name,
       render.framerate.latent_sync.auto_bias_target->store (wszPercent);
     }
 
-    render.framerate.latent_sync.skip_frames->store (config.render.framerate.latent_sync.skip_frames);
+    render.framerate.latent_sync.skip_frames->store  (config.render.framerate.latent_sync.skip_frames);
+    render.framerate.latent_sync.phase_lock->store   (config.render.framerate.latent_sync.phase_lock);
+    render.framerate.latent_sync.pi_auto_bias->store (config.render.framerate.latent_sync.pi_auto_bias);
 
     texture.d3d9.clamp_lod_bias->store              (config.textures.clamp_lod_bias);
 

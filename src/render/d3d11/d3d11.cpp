@@ -519,6 +519,10 @@ SK_D3D11_GetWrappedImmediateContext ( ID3D11Device *pDev )
 
 int SK_D3D11_AllocatedDevContexts = 0;
 
+// Incremented any time a context is assigned a handle, so that per-thread
+//   caches do not hold onto a handle that was since replaced.
+volatile LONG SK_D3D11_DevCtxHandleGeneration = 0;
+
 BOOL
 SK_D3D11_SetDeviceContextHandle ( ID3D11DeviceContext *pDevCtx,
                                   LONG                 handle )
@@ -540,79 +544,65 @@ SK_D3D11_SetDeviceContextHandle ( ID3D11DeviceContext *pDevCtx,
     return FALSE;
   }
 
+  InterlockedIncrement (&SK_D3D11_DevCtxHandleGeneration);
+
   return TRUE;
 }
 
-static constexpr LONG RESOLVE_MAX = 16;
+static constexpr UINT RESOLVE_MAX = 4;
 
-std::pair <ID3D11DeviceContext*, LONG> last_resolve;
-std::pair <ID3D11DeviceContext*, LONG> prev_resolves [RESOLVE_MAX];
-volatile LONG                               resolve_idx   = 0;
-volatile LONG                               resolve_mutex = 0;
+// Per-thread, so that lookups (once per-draw while tracking) need no lock
+struct SK_D3D11_DevCtxHandleCache {
+  ID3D11DeviceContext* pDevCtx    [RESOLVE_MAX] = { };
+  LONG                 handle     [RESOLVE_MAX] = { };
+  LONG                 generation               = -1;
+  UINT                 next                     =  0;
+};
+
+static thread_local SK_D3D11_DevCtxHandleCache
+  SK_D3D11_DevCtxHandles;
 
 LONG
 SK_D3D11_GetDeviceContextHandle ( ID3D11DeviceContext *pDevCtx ) noexcept
 {
   if (pDevCtx == nullptr) return SK_D3D11_MAX_DEV_CONTEXTS;
 
-  while (InterlockedCompareExchange (&resolve_mutex, 1, 0) != 0)
-    YieldProcessor ();
+  auto& cache =
+    SK_D3D11_DevCtxHandles;
 
-  auto early_out =
-    &last_resolve;
+  const LONG generation =
+    ReadAcquire (&SK_D3D11_DevCtxHandleGeneration);
 
-  if (early_out->first == pDevCtx)
+  if (cache.generation != generation)
   {
-    LONG ret =
-      early_out->second;
-
-    WriteRelease (&resolve_mutex, 0);
-
-    return ret;
+    cache            = { };
+    cache.generation = generation;
   }
 
-  early_out =
-    &prev_resolves [std::min (RESOLVE_MAX, ReadAcquire (&resolve_idx) - 1)];
-
-  if (early_out->first == pDevCtx)
+  else
   {
-    LONG ret =
-      early_out->second;
-
-    WriteRelease (&resolve_mutex, 0);
-
-    return ret;
+    for ( UINT i = 0 ; i < RESOLVE_MAX ; ++i )
+    {
+      if (cache.pDevCtx [i] == pDevCtx)
+        return cache.handle [i];
+    }
   }
-
-  WriteRelease (&resolve_mutex, 0);
 
   auto _CacheResolution =
-    [&](LONG idx, ID3D11DeviceContext* pCtx, LONG handle) ->
+    [&](ID3D11DeviceContext* pCtx, LONG handle) ->
     void
     {
-      while (InterlockedCompareExchange (&resolve_mutex, 1, 0) != 0) YieldProcessor ();
-      {
-        auto new_pair ( std::make_pair (pCtx, handle) );
-            std::swap ( prev_resolves  [idx],
-                        new_pair );
+      const UINT idx =
+        cache.next;
 
-        InterlockedExchange (&resolve_idx, std::min (RESOLVE_MAX, idx));
-
-        last_resolve = std::make_pair (pCtx, handle);
-      }
-      WriteRelease (&resolve_mutex, 0);
+      cache.pDevCtx [idx] = pCtx;
+      cache.handle  [idx] = handle;
+      cache.next          = (idx + 1) % RESOLVE_MAX;
     };
 
 
   UINT size   = sizeof (LONG);
   LONG handle = SK_D3D11_MAX_DEV_CONTEXTS;
-
-
-  LONG idx =
-    ReadAcquire (&resolve_idx) + 1;
-
-  if (idx >= RESOLVE_MAX)
-      idx  = 0;
 
 
   if ( SUCCEEDED (
@@ -621,7 +611,7 @@ SK_D3D11_GetDeviceContextHandle ( ID3D11DeviceContext *pDevCtx ) noexcept
        )
      )
   {
-    _CacheResolution (idx, pDevCtx, handle);
+    _CacheResolution (pDevCtx, handle);
 
     return handle;
   }
@@ -647,7 +637,7 @@ SK_D3D11_GetDeviceContextHandle ( ID3D11DeviceContext *pDevCtx ) noexcept
 
   SK_ReleaseAssert (handle < SK_D3D11_MAX_DEV_CONTEXTS);
 
-  _CacheResolution (idx, pDevCtx, handle);
+  _CacheResolution (pDevCtx, handle);
 
   return handle;
 }
