@@ -36,6 +36,8 @@
 #endif
 
 #include <format>
+#include <json/json.hpp>
+#include <cwctype>
 
 #define D3D11_RAISE_FLAG_DRIVER_INTERNAL_ERROR 1
 
@@ -8675,6 +8677,159 @@ SK_AppCache_Manager::getAppNameFromID (AppId64_t uiAppID) const
   return L"";
 }
 
+#define SK_APP_CACHE_ALLOW_REGISTRY_LOOKUP true
+
+// Profile names that SKIF mirrors from HKCU\Software\Kaldaien\Special K\Profiles to
+//   <install path>\Profiles\AppCache\ProfileNames.json, for games that run as another Windows user than the one
+//     using SKIF, whose HKCU lacks the mappings (e.g. the itch.io app's sandbox runs games as an itch-player-* user).
+//       Looked up like the registry: the path itself, then each parent folder. Empty if there is no name.
+//
+//   { "version": 1, "profiles": { "<path>": "<profile name>", ... } }
+//
+//   The first lookup happens before SpecialK.log exists, so the outcome of reading the file is also sent to the
+//     debugger output (OutputDebugString), and logged again by the first lookup with log_status set.
+static std::wstring
+SK_AppCache_GetSharedProfileName (const wchar_t* wszPath, bool log_status = false)
+{
+  SK_PROFILE_FIRST_CALL
+
+  if (wszPath == nullptr || *wszPath == L'\0')
+    return L"";
+
+  static std::wstring                  profile_name {};
+  static std::mutex                    lock;
+  std::scoped_lock <std::mutex> guard (lock);
+
+  static std::unordered_map <std::wstring, std::wstring> profiles {}; // Lowercase path -> name
+  static std::wstring                                    status   {}; // Outcome of reading it
+
+  auto _ToLower = [](std::wstring str) -> std::wstring
+  {
+    std::transform ( str.begin (), str.end (), str.begin (),
+                       [](wchar_t ch) { return static_cast <wchar_t> (std::towlower (ch)); } );
+
+    return str;
+  };
+
+  // Read the file once the install path is known (never cache an attempt made without it)
+  if (const wchar_t* wszInstallPath  = SK_GetInstallPath ();
+                     wszInstallPath != nullptr && *wszInstallPath != L'\0')
+  {
+    const std::filesystem::path file =
+      std::filesystem::path (wszInstallPath) /
+        LR"(Profiles\AppCache\ProfileNames.json)";
+
+    profiles.clear ();
+
+    HANDLE hFile =
+      CreateFileW ( file.c_str (), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                      nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr );
+
+    if (hFile == INVALID_HANDLE_VALUE)
+    {
+      const DWORD dwError = GetLastError ();
+
+      status =
+        SK_FormatStringW ( L"Could not open %ws (Win32 error %u%ws)", file.c_str (), dwError,
+                             (dwError == ERROR_ACCESS_DENIED)    ? L": access denied for this Windows user" :
+                             (dwError == ERROR_FILE_NOT_FOUND ||
+                              dwError == ERROR_PATH_NOT_FOUND)   ? L": not found"                           : L"" );
+    }
+
+    else
+    {
+      std::string data;
+      DWORD       size =
+        sk::narrow_cast <DWORD> (SK_File_GetSize (file.c_str ()));
+
+      if (size > 0 && size < 64 * 1024 * 1024)
+      {
+        data.resize (size);
+
+        if (! ReadFile (hFile, data.data (), size, &size, nullptr))
+          size = 0;
+        else
+          data.resize (size);
+      }
+
+      CloseHandle (hFile);
+
+      nlohmann::json json =
+        nlohmann::json::parse (data, nullptr, false);
+
+      if (json.is_discarded () || ! json.is_object () || ! json.contains ("profiles") || ! json ["profiles"].is_object ())
+        status = SK_FormatStringW (L"Could not parse %ws (%zu bytes read)", file.c_str (), data.size ());
+
+      else
+      {
+        for (const auto& [path, name] : json ["profiles"].items ())
+        {
+          if (name.is_string ())
+            profiles.emplace ( _ToLower (SK_UTF8ToWideChar (path).c_str ()),
+                           std::wstring (SK_UTF8ToWideChar (name.get <std::string> ()).c_str ()) );
+        }
+
+        status =
+          SK_FormatStringW (L"Read %zu shared profile names from %ws", profiles.size (), file.c_str ());
+      }
+    }
+
+    OutputDebugStringW ((L"[Special K] [ AppCache ] " + status + L"\n").c_str ());
+
+    SK_LOGs0 (L" AppCache ", L"%ws", status.c_str ());
+  }
+
+  else if (status.empty ())
+    status = L"Shared profile names not read yet: the install path is not known";
+
+  if (wszPath != nullptr && ! profiles.empty ())
+  {
+    try
+    {
+      std::filesystem::path path =
+        std::filesystem::path (wszPath).lexically_normal ();
+
+      // Down to the first folder below the root (e.g. C:\Games)
+      while (path.has_relative_path ())
+      {
+        if ( auto it  = profiles.find (_ToLower (path.wstring ()));
+                  it != profiles.end () )
+        {
+          profile_name = it->second;
+          break;
+        }
+
+        path =
+          path.parent_path ();
+      }
+    }
+
+    catch (const std::exception& e)
+    {
+      SK_LOGs0 ( L" AppCache ",
+                 L"AppCache Parse Failure: %hs during Shared Profile Name Lookup",
+                                 e.what () );
+    }
+  }
+
+  // Repeated once later, as the first lookup's log entry is written before SpecialK.log exists
+  if (log_status)
+  {
+    static int fail_count = 0;
+
+    if (++fail_count > 1) SK_RunOnce
+    (
+      SK_LOGs0 ( L" AppCache ", L"%ws; %ws -> %ws", status.c_str (),
+                   (wszPath != nullptr)    ? wszPath
+                                           : L"(null)",
+                     profile_name.empty () ? L"(no shared profile name)"
+                                           : profile_name.c_str () );
+    );
+  }
+
+  return profile_name;
+}
+
 std::wstring
 SK_AppCache_Manager::getAppNameFromPath (const wchar_t* wszPath) const
 {
@@ -8692,7 +8847,7 @@ SK_AppCache_Manager::getAppNameFromPath (const wchar_t* wszPath) const
   CRegKey hkAppCacheRoot;
           hkAppCacheRoot.Open (HKEY_CURRENT_USER, LR"(Software\Kaldaien\Special K\Profiles)");
 
-  if ((intptr_t)hkAppCacheRoot.m_hKey > 0)
+  if (SK_APP_CACHE_ALLOW_REGISTRY_LOOKUP && (intptr_t)hkAppCacheRoot.m_hKey > 0)
   {
     std::filesystem::path path =
       std::filesystem::path (wszPath).lexically_normal ();
@@ -8731,7 +8886,8 @@ SK_AppCache_Manager::getAppNameFromPath (const wchar_t* wszPath) const
     }
   }
 
-  return L"";
+  return
+    SK_AppCache_GetSharedProfileName (wszPath, true);
 }
 
 bool
@@ -8928,7 +9084,7 @@ SK_AppCache_Manager::getConfigPathFromAppPath (const wchar_t* wszPath) const
   CRegKey hkAppCacheRoot;
           hkAppCacheRoot.Open (HKEY_CURRENT_USER, LR"(Software\Kaldaien\Special K\Profiles)");
 
-  if ((intptr_t)hkAppCacheRoot.m_hKey > 0)
+  if (SK_APP_CACHE_ALLOW_REGISTRY_LOOKUP && (intptr_t)hkAppCacheRoot.m_hKey > 0)
   {
     path =
       std::filesystem::path (wszPath).lexically_normal ();
@@ -8973,6 +9129,17 @@ SK_AppCache_Manager::getConfigPathFromAppPath (const wchar_t* wszPath) const
                  L"AppCache Parse Failure: %hs during Profile Name Lookup",
                                  e.what () );
     }
+  }
+
+  // Not mapped for this Windows user: the names SKIF shares with all users (e.g. games in the itch.io sandbox)
+  if (std::wstring shared  = SK_AppCache_GetSharedProfileName (wszPath);
+                 ! shared.empty ())
+  {
+    auto ret =
+      getConfigPathForGenericApp (shared.c_str ());
+
+    if (! ret.empty ())
+      return ret;
   }
 
   return

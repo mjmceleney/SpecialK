@@ -1,4 +1,58 @@
-﻿26.10.26
+﻿26.10.29.3
+==========
+ + Fixed the same thing as 26.10.29.2, but for wrapped SwapChains.
+ + Prevent setting DXGI_FORMAT_UNKNOWN to _last_requested_format.
+ + Fixed data race on the cached views for SwapChain proxy buffers.
+
+26.10.29.2
+==========
+ + Fixed crash that could occur if a game passes nullptr to
+     IDXGISwapChain4::SetHDRMetadata (...).
+
+26.10.29.1
+==========
+ + Fixed various window management issues.
+
+26.10.29
+========
+ + Fixed issues with the game window not being considered active by SK when
+     alt-tabbing in if the game has more than one window or ADHD multi-monitor
+       mode is active.
+
+26.10.28.3
+==========
+ + Fixed EDID parser problems for Refresh Rates > 255 Hz
+ + Eliminated DXGI SwapChain Wait Handle leaks when forcing Waitable SwapChains
+ + Fixed several Vulkan API hooking problems related to Reflex extensions
+ + Do not attempt to index arrays using DISPLAYCONFIG_PATH_MODE_IDX_INVALID
+
+26.10.28.2
+==========
+ + More static analysis cleanup.
+ + Potentially fixed ImGui fonts not loading on systems whose username contains
+     non-Latin characters.
+ + Tweaked framerate limiter timing code for greater precision.
+
+26.10.28.1
+==========
+ + Reduced overhead when SKIF is not running but global injection is active.
+ + Various static analysis fixes that hopefully do not break anything.
+ + ASI files will no longer be located if they are in a subdirectory of SK's
+     profile for the specific game; recursive searching is too slow in profiles
+       with many screenshots.
+
+26.10.28
+========
+ + Added profile name resolution using Profiles\AppCache\ProfileNames.json to
+     handle sandboxed games that cannot access the user's registry where these
+       executable path -> profile name mappings are normally stored.
+
+26.10.27
+========
+ + Revert INI parser memory optimization because it causes an off-by-one error
+     when importing INI sections from master/default_SpecialK.ini.
+
+26.10.26
 ========
  + Minor optimizations to per-frame input and overlay rendering code.
 

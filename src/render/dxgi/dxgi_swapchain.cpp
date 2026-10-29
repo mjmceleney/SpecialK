@@ -83,13 +83,28 @@ SK_DXGI_ReleaseSwapChainOnHWnd (
 );
 
 
-uint64_t SK_DXGI_SwapChainDestroyedOnFrame = 0;
+// UINT64_MAX = no SwapChain has been destroyed yet
+std::atomic<uint64_t> SK_DXGI_SwapChainDestroyedOnFrame = UINT64_MAX;
 
 uint64_t
 SK_DXGI_LastFrameSwapChainDestroyed (void) noexcept
 {
   return
     SK_DXGI_SwapChainDestroyedOnFrame;
+}
+
+bool
+SK_DXGI_SwapChainDestroyedRecently (uint64_t frames) noexcept
+{
+  const uint64_t destroyed =
+    SK_DXGI_SwapChainDestroyedOnFrame;
+
+  if (destroyed == UINT64_MAX)
+    return false;
+
+  // The frame counter only increases, so (now - destroyed) cannot wrap
+  return
+    SK_GetFramesDrawn () - destroyed < frames;
 }
 
 void
@@ -324,6 +339,8 @@ IWrapDXGISwapChain::Release (void)
   {
     auto _ClearCachedViews = [&](void)
     {
+      std::scoped_lock _(_backbufferLock);
+      
       for (     auto& rtv : _backbuffer_rtvs)
         if (auto orig_rtv = std::exchange (rtv.second, nullptr);
                  orig_rtv != nullptr)
@@ -1062,7 +1079,8 @@ IWrapDXGISwapChain::ResizeBuffers ( UINT        BufferCount,
                    SK_DXGI_FormatToStr (NewFormat).data () );
     }
 
-    _last_requested_format = NewFormat;
+    if (NewFormat != DXGI_FORMAT_UNKNOWN)
+      _last_requested_format = NewFormat;
 
     state_cache._stalebuffers = false;
 
@@ -1171,7 +1189,8 @@ IWrapDXGISwapChain::ResizeTarget (const DXGI_MODE_DESC *pNewTargetParameters)
                    SK_DXGI_FormatToStr (pNewTargetParameters->Format).data () );
     }
 
-    _last_requested_format = pNewTargetParameters->Format;
+    if (pNewTargetParameters->Format != DXGI_FORMAT_UNKNOWN)
+      _last_requested_format = pNewTargetParameters->Format;
   }
 
   return hr;
@@ -1457,6 +1476,9 @@ IWrapDXGISwapChain::GetMaximumFrameLatency (UINT *pMaxLatency)
 
   HRESULT hr = S_OK;
 
+  if (pMaxLatency == nullptr)
+    return E_INVALIDARG;
+
   // We are overriding, do not let the game know...
   if (config.render.framerate.pre_render_limit > 0)
   {
@@ -1637,7 +1659,7 @@ IWrapDXGISwapChain::SetHDRMetaData ( DXGI_HDR_METADATA_TYPE  Type,
 
   if (Type == DXGI_HDR_METADATA_TYPE_NONE || (Size == sizeof (DXGI_HDR_METADATA_HDR10) && Type == DXGI_HDR_METADATA_TYPE_HDR10))
   {
-    if (Size == sizeof (DXGI_HDR_METADATA_HDR10) && Type == DXGI_HDR_METADATA_TYPE_HDR10)
+    if (Size == sizeof (DXGI_HDR_METADATA_HDR10) && Type == DXGI_HDR_METADATA_TYPE_HDR10 && pMetaData != nullptr)
     {
       metadata =
         *(DXGI_HDR_METADATA_HDR10 *)pMetaData;
@@ -1681,8 +1703,11 @@ IWrapDXGISwapChain::SetHDRMetaData ( DXGI_HDR_METADATA_TYPE  Type,
       auto& rb =
         SK_GetCurrentRenderBackend ();
 
+      const auto active_display =
+        std::clamp (rb.active_display,0,SK_RenderBackend_V2::_MAX_DISPLAYS-1);
+
       auto& display =
-        rb.displays [rb.active_display];
+        rb.displays [active_display];
 
       if (display.gamut.maxLocalY == 0.0f)
       {
@@ -1737,8 +1762,6 @@ IWrapDXGISwapChain::SetHDRMetaData ( DXGI_HDR_METADATA_TYPE  Type,
       );
 
       if (Size == sizeof (DXGI_HDR_METADATA_HDR10) && Type == DXGI_HDR_METADATA_TYPE_HDR10)
-        *(DXGI_HDR_METADATA_HDR10 *)pMetaData = metadata;
-      else
       {
         pMetaData = &metadata;
         Size      = sizeof (DXGI_HDR_METADATA_HDR10);
@@ -1784,9 +1807,9 @@ SK_DXGI_SwapChain_SetFullscreenState_Impl (
 
           SK_ComQIPtr <IDXGISwapChain1>
                            pSwapChain1 (pSwapChain);
-                                        pSwapChain1->GetHwnd (&hWnd);
+          if (pSwapChain1.p != nullptr){pSwapChain1->GetHwnd (&hWnd);
           SK_RealizeForegroundWindow (                         hWnd);
-                  SK_ShowWindowAsync (hWnd,                 SW_SHOW);
+                  SK_ShowWindowAsync (hWnd,                 SW_SHOW);}
         }
       }
 
@@ -2133,6 +2156,7 @@ SK_RenderBackend_V2::isMPODisabled (void) const noexcept
   // Check if GraphicsDrivers's DisableOverlays has MPOs disabled
   if (ERROR_SUCCESS == RegOpenKeyExW (HKEY_LOCAL_MACHINE, LR"(SYSTEM\CurrentControlSet\Control\GraphicsDrivers\)", 0, KEY_READ | KEY_WOW64_64KEY, &hKey))
   {
+                                                                                                           size = sizeof (DWORD);
     if (ERROR_SUCCESS != RegQueryValueEx (hKey, L"DisableOverlays", NULL, NULL, (LPBYTE)&iDisableOverlay, &size))
     {
       iDisableOverlay = 0;
@@ -2148,7 +2172,7 @@ SK_RenderBackend_V2::isMPODisabled (void) const noexcept
 
   // Check if DWM's OverlayTestMode has MPOs disabled
   if (ERROR_SUCCESS == RegOpenKeyExW (HKEY_LOCAL_MACHINE, LR"(SOFTWARE\Microsoft\Windows\Dwm\)", 0, KEY_READ | KEY_WOW64_64KEY, &hKey))
-  {
+  {                                                                                                            size = sizeof (DWORD);
     if (ERROR_SUCCESS != RegQueryValueEx (hKey, L"OverlayTestMode", NULL, NULL, (LPBYTE)&flagOverlayTestMode, &size))
     {
       flagOverlayTestMode =
@@ -2387,15 +2411,18 @@ SK_DXGI_SwapChain_ResizeBuffers_Impl (
   if ( borderless &&
        fullscreen && (! rb.fullscreen_exclusive) )
   {
-    if ( rb.active_display >= 0 &&
-         rb.active_display < rb._MAX_DISPLAYS )
+    const auto active_display =
+      std::clamp (rb.active_display,0,SK_RenderBackend_V2::_MAX_DISPLAYS-1);
+
+    if ( active_display >= 0 &&
+         active_display < rb._MAX_DISPLAYS )
     {
       auto w =
-        rb.displays [rb.active_display].rect.right -
-        rb.displays [rb.active_display].rect.left,
+        rb.displays [active_display].rect.right -
+        rb.displays [active_display].rect.left,
            h =
-        rb.displays [rb.active_display].rect.bottom -
-        rb.displays [rb.active_display].rect.top;
+        rb.displays [active_display].rect.bottom -
+        rb.displays [active_display].rect.top;
 
       Width  = w;
       Height = h;
@@ -2848,9 +2875,12 @@ SK_DXGI_SwapChain_ResizeTarget_Impl (
 
   bool borderless = config.window.borderless || rb.isFakeFullscreen ();
 
+  const auto active_display =
+    std::clamp (rb.active_display,0,SK_RenderBackend_V2::_MAX_DISPLAYS-1);
+
   if ( rb.isFakeFullscreen () &&
-        ( ((LONG)new_new_params.Width  != rb.displays [rb.active_display].rect.right  - rb.displays [rb.active_display].rect.left) ||
-          ((LONG)new_new_params.Height != rb.displays [rb.active_display].rect.bottom - rb.displays [rb.active_display].rect.top ) ) )
+        ( ((LONG)new_new_params.Width  != rb.displays [active_display].rect.right  - rb.displays [active_display].rect.left) ||
+          ((LONG)new_new_params.Height != rb.displays [active_display].rect.bottom - rb.displays [active_display].rect.top ) ) )
   {
     SK_ImGui_Warning (
       L"\"Fake Fullscreen\" Mode is Active and Game Requested a non-native Display Resolution.\r\n\r\n\t"
