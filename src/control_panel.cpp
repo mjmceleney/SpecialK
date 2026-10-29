@@ -7295,6 +7295,20 @@ static constexpr uint32_t UPLAY_OVERLAY_PS_CRC32C  { 0x35ae281c };
               ImGui::EndTooltip   ();
             }
 
+            if (mode == (int)limiter_mode_e::LowLatency ||
+                (bReflexSupported && config.nvidia.reflex.enable))
+            {
+              ImGui::Checkbox ( "Defer Wait to End of Frame",
+                                  &config.render.framerate.defer_low_latency_wait );
+
+              ImGui::SetItemTooltip (
+                "Run Special K's end-of-frame housekeeping before the Low-Latency "
+                "limiter and NVIDIA Reflex sleep instead of after, so the game samples "
+                "input sooner after waking.\n\n"
+                "Reflex sleeps after the limiter, so its timing uses current GPU state."
+              );
+            }
+
             if ( static_cast <int> (rb.api) &
                  static_cast <int> (SK_RenderAPI::D3D11) ||
                  static_cast <int> (rb.api) &

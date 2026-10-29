@@ -1002,6 +1002,7 @@ struct {
     sk::ParameterBool*    use_amd_mwaitx          = nullptr;
     sk::ParameterBool*    use_intel_tpause        = nullptr;
     sk::ParameterBool*    adaptive_busy_wait      = nullptr;
+    sk::ParameterBool*    defer_low_latency_wait  = nullptr;
     sk::ParameterBool*    apply_streamline_pacing = nullptr;
     sk::ParameterInt*     streamline_pacing_mode  = nullptr;
     sk::ParameterBool*    ignore_environment_vars = nullptr;
@@ -2152,6 +2153,7 @@ auto DeclKeybind =
     ConfigEntry (render.framerate.use_amd_mwaitx,        L"Use AMD Power-Saving Instructions for Busy-Wait",           dll_ini,         L"Render.FrameRate",      L"UseAMDMWAITX"),
     ConfigEntry (render.framerate.use_intel_tpause,      L"Use Intel Power-Saving Instructions for Busy-Wait",         dll_ini,         L"Render.FrameRate",      L"UseIntelTPAUSE"),
     ConfigEntry (render.framerate.adaptive_busy_wait,    L"Size Busy-Wait Using Measured Timer Accuracy",              dll_ini,         L"Render.FrameRate",      L"AdaptiveBusyWait"),
+    ConfigEntry (render.framerate.defer_low_latency_wait,L"Limiter/Reflex Sleep After SK's End-of-Frame Work",         dll_ini,         L"Render.FrameRate",      L"DeferLowLatencyWait"),
     ConfigEntry (render.framerate.
                                 apply_streamline_pacing, L"Apply Pacing to Native frames when using DLSS Frame Gen.",  dll_ini,         L"Render.FrameRate",      L"EnableStreamlinePacing"),
     ConfigEntry (render.framerate.
@@ -5068,6 +5070,8 @@ auto DeclKeybind =
   render.framerate.use_amd_mwaitx->load       (config.render.framerate.use_amd_mwaitx);
   render.framerate.use_intel_tpause->load     (config.render.framerate.use_intel_tpause);
   render.framerate.adaptive_busy_wait->load   (config.render.framerate.adaptive_busy_wait);
+  render.framerate.defer_low_latency_wait->load
+                                              (config.render.framerate.defer_low_latency_wait);
   render.framerate.apply_streamline_pacing->
                                          load (config.render.framerate.streamline.enable_native_limit);
   render.framerate.streamline_pacing_mode->
@@ -7511,6 +7515,8 @@ SK_SaveConfig ( std::wstring name,
   render.framerate.use_amd_mwaitx->store     (config.render.framerate.use_amd_mwaitx);
   render.framerate.use_intel_tpause->store   (config.render.framerate.use_intel_tpause);
   render.framerate.adaptive_busy_wait->store (config.render.framerate.adaptive_busy_wait);
+  render.framerate.defer_low_latency_wait->store
+                                             (config.render.framerate.defer_low_latency_wait);
 
   render.framerate.apply_streamline_pacing->
                                        store (config.render.framerate.streamline.enable_native_limit);

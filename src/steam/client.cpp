@@ -297,7 +297,7 @@ SteamInternal_CreateInterface_Detour (const char *ver)
   else
   {
     SK_RunOnce (
-      steam_log->Log ( L"Game requested unexpected interface version (%s)!",
+      steam_log->Log ( L"Game requested unexpected interface version (%hs)!",
                          ver )
     );
   }

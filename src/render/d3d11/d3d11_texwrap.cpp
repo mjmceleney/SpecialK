@@ -7440,7 +7440,7 @@ DescribeResource (ID3D11Resource* pRes)
     D3D11_TEXTURE2D_DESC desc = {};
     pTex2D->GetDesc (&desc);
 
-    desc_out += SK_FormatStringW (L"(%lux%lu): %s { %s/%s }",
+    desc_out += SK_FormatStringW (L"(%lux%lu): %hs { %hs/%hs }",
                   desc.Width, desc.Height, SK_DXGI_FormatToStr (desc.Format).c_str (),
                                         SK_D3D11_DescribeUsage (desc.Usage),
                    SK_D3D11_DescribeBindFlags ((D3D11_BIND_FLAG)desc.BindFlags).c_str ());
@@ -14630,7 +14630,7 @@ SK_D3D11_TexCacheCheckpoint (void)
             UINT refs_plus_1 = (*desc)->texture->AddRef  ();
             UINT refs        = (*desc)->texture->Release ();
 
-            SK_LOG1 ( ( L"(%lux%lu@%lu [%s] - %s, %s, %s : CPU Usage=%x -- refs+1=%lu, refs=%lu",
+            SK_LOG1 ( ( L"(%lux%lu@%lu [%hs] - %hs, %hs, %hs : CPU Usage=%x -- refs+1=%lu, refs=%lu",
                         tex_desc->Width, tex_desc->Height, tex_desc->MipLevels,
                         SK_DXGI_FormatToStr (tex_desc->Format).c_str (),
                         SK_D3D11_DescribeBindFlags ((D3D11_BIND_FLAG)tex_desc->BindFlags).c_str (), 

@@ -2438,21 +2438,23 @@ SK_NVAPI_DumpProfileSettings (void)
 
       case NVDRS_BINARY_TYPE:
       {
-        dll_log->Log (L"\tBinary_Value_%03d: Default = %b", i, setting_values.binaryDefaultValue);
+        // %b is not a valid format specifier (the CRT treats it as an invalid
+        //   parameter), and binary settings are structs; log their sizes instead.
+        dll_log->Log (L"\tBinary_Value_%03d: Default = <%lu bytes>", i, setting_values.binaryDefaultValue.valueLength);
 
         for (auto k = 0u; k < setting_values.numSettingValues; ++k)
         {
-          dll_log->Log (L" Option_%d = %b", k, setting_values.settingValues [k].binaryValue);
+          dll_log->Log (L" Option_%d = <%lu bytes>", k, setting_values.settingValues [k].binaryValue.valueLength);
         }
       } break;
 
       case NVDRS_STRING_TYPE:
       {
-        dll_log->Log (L"\tString_Value_%03d: Default = %hs", i, setting_values.wszDefaultValue);
+        dll_log->Log (L"\tString_Value_%03d: Default = %ws", i, (const wchar_t *)setting_values.wszDefaultValue);
 
         for (auto k = 0u; k < setting_values.numSettingValues; ++k)
         {
-          dll_log->Log (L" Option_%d = %hs", k, setting_values.settingValues [k].wszValue);
+          dll_log->Log (L" Option_%d = %ws", k, (const wchar_t *)setting_values.settingValues [k].wszValue);
         }
       } break;
       case NVDRS_WSTRING_TYPE:

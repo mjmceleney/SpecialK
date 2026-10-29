@@ -1974,7 +1974,7 @@ SK_D3D11_TexCacheCheckpoint (void)
           const UINT refs        = (*desc)->texture->Release ();
 
           SK_LOG1 (
-            ( L"(%lux%lu@%lu [%s] - %s, %s, %s : CPU Usage=%x -- "
+            ( L"(%lux%lu@%lu [%hs] - %hs, %hs, %hs : CPU Usage=%x -- "
               L"refs+1=%lu, refs=%lu",
               tex_desc->Width,
               tex_desc->Height,           tex_desc->MipLevels,

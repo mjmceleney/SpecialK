@@ -860,6 +860,7 @@ struct sk_config_t
       bool    use_amd_mwaitx       =   true;
       bool    use_intel_tpause     =  false;
       bool    adaptive_busy_wait   =   true; // Size busy-wait from measured timer error
+      bool    defer_low_latency_wait = true; // Limiter (Low-Latency) and Reflex sleep after SK's end-of-frame work
       struct streamline_s {
         bool  enable_native_limit  =   true;
         float target_fps           =   0.0f;
