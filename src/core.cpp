@@ -311,6 +311,9 @@ SK_LoadGPUVendorAPIs (void)
         SK_NGX_Init ();
       }
 
+      // Catches games that import the FidelityFX DLL statically (loaded before our LoadLibrary hooks)
+      SK_FFX_Init ();
+
       const int num_sli_gpus =
         sk::NVAPI::CountSLIGPUs ();
 

@@ -925,6 +925,8 @@ struct {
     sk::ParameterBool*    spoof_feature_support   = nullptr;
     sk::ParameterBool*    streamline_dbg_out      = nullptr;
     sk::ParameterBool*    slop_stop_5000          = nullptr;
+    sk::ParameterBool*    force_neural_render     = nullptr;
+    sk::ParameterBool*    trace_neural_params     = nullptr;
     sk::ParameterFloat*   dlssfg_menu_fps         = nullptr;
   } dlss;
 } nvidia;
@@ -2217,7 +2219,7 @@ auto DeclKeybind =
     ConfigEntry (nvidia.dlss.force_dlaa,                 L"Force DLAA in games that do not normally support it",       dll_ini,         L"NVIDIA.DLSS",           L"ForceDLAA"),
     ConfigEntry (nvidia.dlss.use_sharpening,             L"Override DLSS Sharpening Mode",                             dll_ini,         L"NVIDIA.DLSS",           L"UseSharpening"),
     ConfigEntry (nvidia.dlss.forced_sharpness,           L"Sharpness Value to Use",                                    dll_ini,         L"NVIDIA.DLSS",           L"ForcedSharpness"),
-    ConfigEntry (nvidia.dlss.auto_redirect_dll,          L"Always load SK's Plug-In DLSS DLL instead of the game's",   dll_ini,         L"NVIDIA.DLSS",           L"AutoRedirectDLL"),
+    ConfigEntry (nvidia.dlss.auto_redirect_dll,          L"Use SK's Plug-In DLSS DLL instead of the game's DLSS / FSR", dll_ini,         L"NVIDIA.DLSS",           L"AutoRedirectDLL"),
     ConfigEntry (nvidia.dlss.forced_preset,              L"Override DLSS Perf/Quality Level's Preset",                 dll_ini,         L"NVIDIA.DLSS",           L"ForcePreset"),
     ConfigEntry (nvidia.dlss.forced_rr_preset,           L"Override Ray Reconstruction Perf/Quality Level's Preset",   dll_ini,         L"NVIDIA.DLSS",           L"ForcePresetRR"),
     ConfigEntry (nvidia.dlss.forced_auto_exposure,       L"Override DLSS Auto Exposure",                               dll_ini,         L"NVIDIA.DLSS",           L"ForcedAutoExposure"),
@@ -2239,6 +2241,8 @@ auto DeclKeybind =
     ConfigEntry (nvidia.dlss.spoof_feature_support,      L"Report all NGX (D3D11/D3D12) features supported on all HW.",dll_ini,         L"NVIDIA.DLSS",           L"SpoofFeatureSupport"),
     ConfigEntry (nvidia.dlss.streamline_dbg_out,         L"Output Streamline Framework's Debug to game_output.log.",   dll_ini,         L"NVIDIA.DLSS",           L"UseStreamlineDebugLog"),
     ConfigEntry (nvidia.dlss.slop_stop_5000,             L"Prevent DLSS5 from being used.",                            dll_ini,         L"NVIDIA.DLSS",           L"SlopStop5000"),
+    ConfigEntry (nvidia.dlss.force_neural_render,        L"Experimental: Force DLSS5 on after DLSS-SR (D3D12 only).",  dll_ini,         L"NVIDIA.DLSS",           L"ForceNeuralRendering"),
+    ConfigEntry (nvidia.dlss.trace_neural_params,        L"Log the NGX parameters DLSS5 reads (to discover its inputs).",dll_ini,       L"NVIDIA.DLSS",           L"TraceNeuralRenderingParams"),
     ConfigEntry (nvidia.dlss.dlssfg_menu_fps,            L"Framerate Limit to apply in menus in DLSS FG games.",       dll_ini,         L"NVIDIA.DLSS",           L"FrameGenMenuFPS"),
 
     ConfigEntry (render.hdr.enable_32bpc,                L"Experimental - Use 32bpc for HDR",                          dll_ini,         L"SpecialK.HDR",          L"Enable128BitPipeline"),
@@ -5208,6 +5212,8 @@ auto DeclKeybind =
   nvidia.dlss.spoof_feature_support->load    (config.nvidia.dlss.spoof_support);
   nvidia.dlss.streamline_dbg_out->load       (config.nvidia.dlss.streamline_dbg_out);
   nvidia.dlss.slop_stop_5000->load           (config.nvidia.dlss.slop_stop_5000);
+  nvidia.dlss.force_neural_render->load      (config.nvidia.dlss.force_neural_render);
+  nvidia.dlss.trace_neural_params->load      (config.nvidia.dlss.trace_neural_params);
   nvidia.dlss.dlssfg_menu_fps->load          (config.nvidia.dlss.dlssfg_menu_fps);
 
   render.hdr.enable_32bpc->load              (config.render.hdr.enable_32bpc);
@@ -7681,6 +7687,8 @@ SK_SaveConfig ( std::wstring name,
       nvidia.dlss.spoof_feature_support->store    (config.nvidia.dlss.spoof_support);
       nvidia.dlss.streamline_dbg_out->store       (config.nvidia.dlss.streamline_dbg_out);
       nvidia.dlss.slop_stop_5000->store           (config.nvidia.dlss.slop_stop_5000);
+      nvidia.dlss.force_neural_render->store      (config.nvidia.dlss.force_neural_render);
+      nvidia.dlss.trace_neural_params->store      (config.nvidia.dlss.trace_neural_params);
       nvidia.dlss.dlssfg_menu_fps->store          (config.nvidia.dlss.dlssfg_menu_fps);
       render.framerate.max_delta_time->store      (config.render.framerate.max_delta_time);
       render.framerate.flip_discard->store        (config.render.framerate.flip_discard);

@@ -3024,6 +3024,9 @@
     <ClInclude Include="include\SpecialK\render\ngx\ngx_dlss.h">
       <Filter>Header Files\Backends\Render\ngx</Filter>
     </ClInclude>
+    <ClInclude Include="include\SpecialK\render\ngx\ngx_ffx.h">
+      <Filter>Header Files\Backends\Render\ngx</Filter>
+    </ClInclude>
     <ClInclude Include="include\SpecialK\plugin\reshade.h">
       <Filter>Header Files\Plugins</Filter>
     </ClInclude>
@@ -3894,6 +3897,15 @@
       <Filter>Source Files\Backends\Input\Windows.Gaming.Input</Filter>
     </ClCompile>
     <ClCompile Include="src\render\ngx\ngx_d3d12.cpp">
+      <Filter>Source Files\Backends\Render\NGX</Filter>
+    </ClCompile>
+    <ClCompile Include="src\render\ngx\ngx_ffx.cpp">
+      <Filter>Source Files\Backends\Render\NGX</Filter>
+    </ClCompile>
+    <ClCompile Include="src\render\ngx\ngx_ffx_api.cpp">
+      <Filter>Source Files\Backends\Render\NGX</Filter>
+    </ClCompile>
+    <ClCompile Include="src\render\ngx\ngx_ffx_legacy.cpp">
       <Filter>Source Files\Backends\Render\NGX</Filter>
     </ClCompile>
     <ClCompile Include="src\render\ngx\ngx_d3d11.cpp">

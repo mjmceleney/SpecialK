@@ -1145,7 +1145,7 @@ struct sk_config_t
     } reflex;
     struct dlss_s {
       bool    force_dlaa          =  false;
-      bool    auto_redirect_dlss  =  false;
+      bool    auto_redirect_dlss  =  false; // Also replaces FSR upscaling with DLSS
       std::wstring
               dlss_dll            =    L"";
       std::wstring
@@ -1164,6 +1164,8 @@ struct sk_config_t
       bool    streamline_dbg_out  =  false;
       float   dlssfg_menu_fps     =   0.0f;
       bool    slop_stop_5000      =  false;
+      bool    force_neural_render =  false; // Experimental: run DLSS 5 after DLSS-SR (D3D12)
+      bool    trace_neural_params =  false; // Log parameters DLSS 5 reads at create/evaluate
       struct {
         float performance         =   0.0f;
         float balanced            =   0.0f;

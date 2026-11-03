@@ -281,6 +281,20 @@ using  GetNGXResultAsString_pfn = const wchar_t* (NVSDK_CONV *)(NVSDK_NGX_Result
 extern GetNGXResultAsString_pfn GetNGXResultAsString;
 
 bool SK_NGX_HookParameters (NVSDK_NGX_Parameter *Params);
+
+// Feature whose create/evaluate is executing on this thread with parameter
+//   tracing enabled (-1 = none); parameter reads made by NGX are logged.
+extern thread_local int SK_NGX_TraceFeature;
+
+struct SK_NGX_TraceScope
+{
+  int prev;
+
+  SK_NGX_TraceScope (bool active, int feature) : prev (SK_NGX_TraceFeature)
+  { if (active) SK_NGX_TraceFeature = feature; }
+ ~SK_NGX_TraceScope (void)
+  {             SK_NGX_TraceFeature = prev;    }
+};
 void SK_NGX_Reset          (void);
 
 void SK_NGX_DumpParameters (const NVSDK_NGX_Parameter *Params);
@@ -304,3 +318,6 @@ extern void *SK_NGX_DLSSG_Depth_Buffer;
 
 void SK_NGX_Init              (void);
 void SK_NGX_UpdateDLSSGStatus (void);
+
+// Hooks the FidelityFX API DLL (if loaded) to replace FSR upscaling with DLSS
+void SK_FFX_Init              (void);
