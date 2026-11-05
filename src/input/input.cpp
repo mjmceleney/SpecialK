@@ -1,6 +1,4 @@
-﻿// This is an open source non-commercial project. Dear PVS-Studio, please check it.
-// PVS-Studio Static Code Analyzer for C, C++, C#, and Java: https://pvs-studio.com
-/**
+﻿/**
  * This file is part of Special K.
  *
  * Special K is free software : you can redistribute it
@@ -33,10 +31,6 @@
 #include <SpecialK/injection/injection.h>
 #include <SpecialK/storefront/xbox.h>
 
-extern "C" {
-  extern LONG g_sHookedPIDs [MAX_INJECTED_PROCS];
-}
-
 DWORD SK_WGI_GamePollingThreadId = 0;
 
 bool
@@ -49,7 +43,7 @@ SK_ImGui_WantGamepadCapture (bool update) noexcept
 
   if (! update)
   {
-    return capture.load () || lastFrameCaptured > SK_GetFramesDrawn () - 2;
+    return capture.load () || (lastFrameCaptured != 0 && lastFrameCaptured + 2 > SK_GetFramesDrawn ());
   }
 
   // Do not block on first frame drawn unless explicitly disabled
@@ -96,7 +90,7 @@ SK_ImGui_WantGamepadCapture (bool update) noexcept
                            SK_WGI_GamePollingThreadId )
         );
 
-        if ((intptr_t)hThread__.m_h > 0)
+        if (hThread__.isValid ())
         {
           static int suspensions = 0;
 
@@ -288,9 +282,12 @@ SK_ImGui_HandlesMessage (MSG *lpMsg, bool /*remove*/, bool /*peek*/)
           game_window.mouse.inside   = false;
           game_window.mouse.tracking = false;
 
-          // We're no longer inside the game window, move the cursor off-screen
-          ImGui::GetIO ().MousePos =
-            ImVec2 (-FLT_MAX, -FLT_MAX);
+          if (SK_GImDefaultContext ())
+          {
+            // We're no longer inside the game window, move the cursor off-screen
+            ImGui::GetIO ().MousePos =
+              ImVec2 (-FLT_MAX, -FLT_MAX);
+          }
         }
         break;
 
@@ -441,6 +438,7 @@ SK_ImGui_HandlesMessage (MSG *lpMsg, bool /*remove*/, bool /*peek*/)
       case WM_LBUTTONDBLCLK:
       case WM_MBUTTONDBLCLK:
       case WM_MBUTTONUP:
+      case WM_MBUTTONDOWN:
       case WM_RBUTTONDBLCLK:
       case WM_RBUTTONDOWN:
       case WM_RBUTTONUP:
@@ -472,33 +470,6 @@ SK_ImGui_HandlesMessage (MSG *lpMsg, bool /*remove*/, bool /*peek*/)
         handled =
           ( 0 != ImGui_WndProcHandler ( lpMsg->hwnd,   lpMsg->message,
                                         lpMsg->wParam, lpMsg->lParam ) );
-      } break;
-
-      case WM_DPICHANGED:
-      {
-        if (SK_GetThreadDpiAwareness () != DPI_AWARENESS_UNAWARE)
-        {
-          const RECT* suggested_rect =
-              (RECT *)lpMsg->lParam;
-
-          SK_LOG0 ( ( L"DPI Scaling Changed: %lu (%.0f%%)",
-                        HIWORD (lpMsg->wParam),
-                ((float)HIWORD (lpMsg->wParam) / (float)USER_DEFAULT_SCREEN_DPI) * 100.0f ),
-                      L"Window Mgr" );
-
-          ::SetWindowPos (
-            lpMsg->hwnd, HWND_TOP,
-              suggested_rect->left,                         suggested_rect->top,
-              suggested_rect->right - suggested_rect->left, suggested_rect->bottom - suggested_rect->top,
-                SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS
-          );
-
-          SK_Window_RepositionIfNeeded ();
-        }
-
-        ////extern void
-        ////SK_Display_UpdateOutputTopology (void);
-        ////SK_Display_UpdateOutputTopology (    );
       } break;
 
       default:
@@ -579,7 +550,7 @@ void SK_Input_PreInit (void)
     SK_SDL_SetDefaultBehavior ("SDL_MOUSE_FOCUS_CLICKTHROUGH",         "1");
 
     // Disable bad window management behavior so that SK can take full control
-    SK_SDL_SetDefaultBehavior ("SDL_HINT_FORCE_RAISEWINDOW",       "0");
+    SK_SDL_SetDefaultBehavior ("SDL_FORCE_RAISEWINDOW",            "0");
     SK_SDL_SetDefaultBehavior ("SDL_ALLOW_TOPMOST",                "0");
     SK_SDL_SetDefaultBehavior ("SDL_WINDOW_ALLOW_TOPMOST",         "0");
     //SK_SDL_SetDefaultBehavior ("SDL_WINDOWS_ENABLE_MESSAGELOOP", "0");
@@ -594,9 +565,9 @@ void SK_Input_PreInit (void)
 
   if (config.input.gamepad.dinput.blackout_gamepads ||
       config.compatibility.sdl.allow_direct_input == 0)
-    SK_SDL_SetDefaultBehavior ("SDL_HINT_JOYSTICK_DIRECTINPUT","0", true);
+    SK_SDL_SetDefaultBehavior ("SDL_JOYSTICK_DIRECTINPUT","0", true);
   else if (config.compatibility.sdl.allow_direct_input == 1)
-    SK_SDL_SetDefaultBehavior ("SDL_HINT_JOYSTICK_DIRECTINPUT","1", true);
+    SK_SDL_SetDefaultBehavior ("SDL_JOYSTICK_DIRECTINPUT","1", true);
 
   auto SK_SDL_SetOverride = [&](int cfg_var, const char* szName)
   {
@@ -717,9 +688,9 @@ SK_Input_Init (void)
       );
     };
 
-    CreateInputVar_Bool ("Input.Keyboard.DisableToGame", &config.input.keyboard.disabled_to_game);
-    CreateInputVar_Bool ("Input.Mouse.DisableToGame",    &config.input.mouse.disabled_to_game);
-    CreateInputVar_Bool ("Input.Gamepad.DisableToGame",  &config.input.gamepad.disabled_to_game);
+    CreateInputVar_Int  ("Input.Keyboard.DisableToGame", &config.input.keyboard.disabled_to_game);
+    CreateInputVar_Int  ("Input.Mouse.DisableToGame",    &config.input.mouse.disabled_to_game);
+    CreateInputVar_Int  ("Input.Gamepad.DisableToGame",  &config.input.gamepad.disabled_to_game);
     CreateInputVar_Bool ("Input.Gamepad.DisableRumble",  &config.input.gamepad.disable_rumble);
     CreateInputVar_Bool ("Input.XInput.HideAllDevices",  &config.input.gamepad.xinput.blackout_api);
     CreateInputVar_Bool ("Input.XInput.EnableEmulation", &config.input.gamepad.xinput.emulate);
@@ -785,33 +756,32 @@ SK_Input_Init (void)
 void
 SK_Input_ReleaseCommonStuckKeys (void) noexcept
 {
-  static const std::pair <BYTE, BYTE> virt_keys_to_release [] =
-    { { (BYTE)VK_MENU,     (BYTE)MapVirtualKey ((BYTE)VK_MENU,     0) },   // 0
+  static constexpr BYTE virt_keys_to_release [] =
+    { VK_MENU,       // 0
     // Dead or Alive processes the UP version of this and displays a quit confirmation,
     //   do not change the state of this button...
-    //{ (BYTE)VK_ESCAPE,   (BYTE)MapVirtualKey ((BYTE)VK_ESCAPE,   0) },   // 1
-      { (BYTE)VK_LWIN,     (BYTE)MapVirtualKey ((BYTE)VK_LWIN,     0) },   // 2
-      { (BYTE)VK_LMENU,    (BYTE)MapVirtualKey ((BYTE)VK_LMENU,    0) },   // 3
-      { (BYTE)VK_LSHIFT,   (BYTE)MapVirtualKey ((BYTE)VK_LSHIFT,   0) },   // 4
-      { (BYTE)VK_LCONTROL, (BYTE)MapVirtualKey ((BYTE)VK_LCONTROL, 0) },   // 5
-      { (BYTE)VK_SHIFT,    (BYTE)MapVirtualKey ((BYTE)VK_SHIFT,    0) },   // 6
-      { (BYTE)VK_CONTROL,  (BYTE)MapVirtualKey ((BYTE)VK_CONTROL,  0) },   // 7
-      { (BYTE)VK_RMENU,    (BYTE)MapVirtualKey ((BYTE)VK_RMENU,    0) },   // 8
-      { (BYTE)VK_RWIN,     (BYTE)MapVirtualKey ((BYTE)VK_RWIN,     0) },   // 9
-      { (BYTE)VK_RSHIFT,   (BYTE)MapVirtualKey ((BYTE)VK_RSHIFT,   0) },   // 10
-      { (BYTE)VK_RCONTROL, (BYTE)MapVirtualKey ((BYTE)VK_RCONTROL, 0) },   // 11
-      { (BYTE)VK_TAB,      (BYTE)MapVirtualKey ((BYTE)VK_TAB,      0) } }; // 12
+    //VK_ESCAPE,     // 1
+      VK_LWIN,       // 2
+      VK_LMENU,      // 3
+      VK_LSHIFT,     // 4
+      VK_LCONTROL,   // 5
+      VK_SHIFT,      // 6
+      VK_CONTROL,    // 7
+      VK_RMENU,      // 8
+      VK_RWIN,       // 9
+      VK_RSHIFT,     // 10
+      VK_RCONTROL,   // 11
+      VK_TAB };      // 12
 
-  for ( auto& [vKey, bScancode] : virt_keys_to_release )
-  {  
+  for ( const BYTE vKey : virt_keys_to_release )
+  {
     if ((SK_GetAsyncKeyState (vKey) & 0x8000) == 0x0)
     {
-      DWORD dwFlags  =
-        ( bScancode & 0xE0 ) == 0   ?
-          static_cast <DWORD> (0x0) :
-          static_cast <DWORD> (KEYEVENTF_EXTENDEDKEY);
+      DWORD      dwFlags   = KEYEVENTF_KEYUP;
+      const BYTE bScancode =
+        SK_Keyboard_GetScancodeAndFlags (vKey, dwFlags);
 
-      SK_keybd_event (vKey, bScancode, dwFlags | KEYEVENTF_KEYUP, 0);
+      SK_keybd_event (vKey, bScancode, dwFlags, 0);
     }
   }
 }
@@ -827,39 +797,15 @@ SK_Input_SetLatencyMarker (void) noexcept
   static volatile DWORD64  ulLastFrame  = 0;
   if (ReadULong64Acquire (&ulLastFrame) <= ulFramesDrawn)
   {
-    static float fLastInput = 0.0f;
-           float fTimeNow   =
+    static double dLastInput = 0.0f;
+           double dTimeNow   =
                 SK_timeGetTimeFloat ();
-    if (fTimeNow > fLastInput + 1.5f || ReadULong64Acquire (&ulLastFrame) < ulFramesDrawn)
-    {              fLastInput = fTimeNow;
+    if (dTimeNow > dLastInput + 1.5f || ReadULong64Acquire (&ulLastFrame) < ulFramesDrawn)
+    {              dLastInput = dTimeNow;
       rb.setLatencyMarkerNV (INPUT_SAMPLE);
     }
 
     WriteULong64Release (&ulLastFrame, ulFramesDrawn);
-  }
-}
-
-
-// SK doesn't use SDL, but many games crash on exit due to polling
-//   joystick after XInput is unloaded... so we'll just terminate
-//     the thread manually so it doesn't crash.
-void
-SK_SDL_ShutdownInput (void)
-{
-  auto tidSDL =
-    SK_Thread_FindByName (L"SDL_joystick");
-
-  if (tidSDL != 0)
-  {
-    SK_AutoHandle hThread (
-      OpenThread (THREAD_ALL_ACCESS, FALSE, tidSDL)
-    );
-
-    if (hThread.isValid ())
-    {
-      SuspendThread      (hThread);
-      SK_TerminateThread (hThread, 0xDEADC0DE);
-    }
   }
 }
 
@@ -915,7 +861,7 @@ SK_ImGui_ProcessGamepadStatusBar (bool bDraw)
     _BatteryPollingIntervalMs = 10000UL;
 
   auto BatteryStateTTL =
-    SK::ControlPanel::current_time - _BatteryPollingIntervalMs;
+    SK::ControlPanel::current_time - std::min (SK::ControlPanel::current_time, _BatteryPollingIntervalMs);
 
   auto current_frame =
     SK_GetFramesDrawn ();
@@ -969,6 +915,9 @@ SK_ImGui_ProcessGamepadStatusBar (bool bDraw)
           else
               battery.last_checked = BatteryStateTTL + 1000; // Retry in 1 second
         }
+
+        else
+          battery.last_checked = BatteryStateTTL + 5000; // Retry in 5 seconds
       }
 
       if (battery.draining && gamepad.attached && battery.battery_info.BatteryLevel <= BATTERY_LEVEL_LOW)

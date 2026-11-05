@@ -1569,11 +1569,17 @@ SteamAPI_RegisterCallback_Detour (class CCallbackBase *pCallback, int iCallback)
     } break;
   }
 
-  if (SK_IsAddressExecutable             (pCallback))
+  if (SK_ValidatePointer (pCallback))
   {
-    if (true || //(! config.platform.achievements.pull_friend_stats) //< Temporarily skip while achievement popups are not implemented
-                 iCallback != UserStatsReceived_t::k_iCallback)
-      SteamAPI_RegisterCallback_Original (pCallback, iCallback);
+    void** vftable =
+      *(void ***)*(&pCallback);
+
+    if (SK_IsAddressExecutable (vftable [0]))
+    {
+      if (true || //(! config.platform.achievements.pull_friend_stats) //< Temporarily skip while achievement popups are not implemented
+                   iCallback != UserStatsReceived_t::k_iCallback)
+        SteamAPI_RegisterCallback_Original (pCallback, iCallback);
+    }
   }
 
   if (steam_callback_cs != nullptr)
@@ -2232,7 +2238,7 @@ public:
   void TryCallback (CCallbackBase* pCallback, UserStatsReceived_t* pParam)
   {
     __try {
-      if (SK_ValidatePointer (pParam, true) && SK_IsAddressExecutable (&pCallback, true))
+      if (SK_ValidatePointer (pParam, true) && SK_ValidatePointer (pCallback, true))
               pCallback->Run (pParam);
     }
     __except ( GetExceptionCode () == EXCEPTION_ACCESS_VIOLATION ?
@@ -3298,7 +3304,7 @@ SteamAPI_RunCallbacks_Detour (void)
                   SK_RunOnce (
                   {
                     wchar_t                               wszMessage [128] = { };
-                    std::wstring_view     wszMessageView (wszMessage);
+                    std::wstring_view     wszMessageView (wszMessage, 128);
                     SK_FormatStringViewW (wszMessageView,
                       L"Steam Input appears to be broken in this game, consider turning it off."
                       L"\r\n\r\n\t\t Session Input Enable Config:\t%x", input_dev_type_mask);
@@ -4475,19 +4481,15 @@ SteamAPI_Init_Detour (void)
 
   bool bRet = false;
 
-  if (steam_init_cs != nullptr)
-      steam_init_cs->lock ();
-
   // In case we already initialized stuff...
   if (ReadAcquire (&__SK_Steam_init))
   {
-    bRet = SK_SAFE_SteamAPI_Init ();
-
-    if (steam_init_cs != nullptr)
-        steam_init_cs->unlock ();
-
-    return bRet;
+    return
+      SK_SAFE_SteamAPI_Init ();
   }
+
+  if (steam_init_cs != nullptr)
+      steam_init_cs->lock ();
 
   static volatile LONG init_tries = -1;
 
@@ -4718,11 +4720,6 @@ SteamAPI_Delay_Init (LPVOID)
 
   return 0;
 }
-
-std::wstring
-SK_RecursiveFileSearch ( const wchar_t* wszDir,
-                         const wchar_t* wszFile );
-
 
 enum SK_File_SearchStopCondition {
   FirstMatchFound,
@@ -6173,6 +6170,12 @@ SK_Steam_ForceInputAppId (AppId64_t appid)
     return;
 
   if (*xinput_emulation != '\0' && atoi (xinput_emulation) == 0)
+    return;
+
+  char                                              ignore_steam_input [8] = { };
+  GetEnvironmentVariableA ("SK_IGNORE_STEAM_INPUT", ignore_steam_input, 7);
+
+  if (*ignore_steam_input != '\0' && atoi (ignore_steam_input) != 0)
     return;
 
   //

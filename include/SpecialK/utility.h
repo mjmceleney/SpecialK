@@ -141,7 +141,9 @@ public:
   bool isValid (void) const noexcept
   {
     return
-      (reinterpret_cast <intptr_t> (m_h) > 0) && SK_IsHandleValid (m_h);
+      reinterpret_cast <intptr_t> (m_h) !=  0 &&
+                                   m_h  != INVALID_HANDLE_VALUE &&
+                 SK_IsHandleValid (m_h);
   }
 
 public:
@@ -228,8 +230,14 @@ LPVOID         SK_Win32_ReleaseTokenInfo    (LPVOID                   lpTokenBuf
 time_t         SK_Win32_FILETIME_to_time_t  (FILETIME const& ft);
 FILETIME       SK_Win32_time_t_to_FILETIME  (time_t          epoch);
 
+// Converts "A=1|B=2" into "A=1\0B=2\0\0"; use || for a literal pipe.
+std::vector <std::pair <std::wstring, std::wstring>>
+               SK_Win32_ParseEnvVarsFromStr (const std::wstring& input);
+
 std::string    SK_WideCharToUTF8            (const std::wstring& in);
 std::wstring   SK_UTF8ToWideChar            (const std::string&  in);
+std::wstring   SK_ANSIToWideChar            (const std::string&  in);
+std::string    SK_WideCharToANSI            (const std::wstring& in);
 
 std::string
 __cdecl        SK_FormatString              (char    const* const _Format, ...);
@@ -542,16 +550,16 @@ SK_ImGui_DrawNotifications (void);
 
 
 struct SK_ThreadSuspension_Ctx {
-  std::queue <DWORD> tids;
+  std::vector <DWORD> tids;
 
-  ULONG              ldrState  = LDR_LOCK_LOADER_LOCK_DISPOSITION_INVALID;
-  ULONG_PTR          ldrCookie = 0x0;
+  ULONG               ldrState  = LDR_LOCK_LOADER_LOCK_DISPOSITION_INVALID;
+  ULONG_PTR           ldrCookie = 0x0;
 };
 
 SK_ThreadSuspension_Ctx
                SK_SuspendAllOtherThreads (void);
 void
-               SK_ResumeThreads          (SK_ThreadSuspension_Ctx threads);
+               SK_ResumeThreads          (const SK_ThreadSuspension_Ctx& threads);
 
 
 bool __cdecl   SK_IsServiceHost          (void);
@@ -1086,9 +1094,9 @@ SK_make_unique_nothrow (Args && ... args) noexcept
 (  T ( std::forward   < Args >     (args)   ... ))
 );
 
-float WINAPI SK_timeGetTimeFloat (void) noexcept;
-DWORD WINAPI SK_timeGetTime      (void) noexcept;
-BOOL  WINAPI SK_PlaySound        (_In_opt_ LPCWSTR pszSound,
+double WINAPI SK_timeGetTimeFloat (void) noexcept;
+DWORD  WINAPI SK_timeGetTime      (void) noexcept;
+BOOL   WINAPI SK_PlaySound        (_In_opt_ LPCWSTR pszSound,
                                   _In_opt_ HMODULE hmod,
                                   _In_     DWORD   fdwSound);
 

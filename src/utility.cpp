@@ -96,6 +96,58 @@ SK_UTF8ToWideChar (const std::string& in)
   return out;
 }
 
+std::wstring
+SK_ANSIToWideChar (const std::string& in)
+{
+  if (in.empty ())
+    return L"";
+
+  constexpr UINT mbFlags = 0x0;
+
+  size_t len =
+    MultiByteToWideChar ( CP_ACP, mbFlags, in.c_str (), -1,
+                           nullptr, 0 );
+
+  std::wstring out (
+    len * 2 + 2,
+      L'\0'
+  );
+
+  MultiByteToWideChar   ( CP_ACP, mbFlags, in.c_str (),
+                                                    -1,
+                                           out.data (),
+                            sk::narrow_cast <DWORD> (len) );
+
+  return out;
+}
+
+std::string
+SK_WideCharToANSI (const std::wstring& in)
+{
+  if (in.empty ())
+    return "";
+
+  constexpr UINT wcFlags =
+    WC_COMPOSITECHECK | WC_NO_BEST_FIT_CHARS;
+
+  size_t len =
+    WideCharToMultiByte ( CP_ACP, wcFlags, in.c_str (), -1,
+                           nullptr, 0, nullptr, FALSE );
+
+  std::string out (
+    len * 2 + 2,
+      '\0'
+  );
+
+  WideCharToMultiByte   ( CP_ACP, wcFlags, in.c_str (),
+                                                    -1,
+                                          out.data  (),
+                         sk::narrow_cast <DWORD> (len),
+                           nullptr,                   FALSE );
+
+  return out;
+}
+
 bool
 SK_COM_TestInit (void)
 {
@@ -365,7 +417,7 @@ SK_GetDocumentsDir (wchar_t* buf, uint32_t* pdwLen)
         return false;
       }
 
-      wcsncat (buf, docs.c_str (), *pdwLen);
+      wcsncat (buf, docs.c_str (), *pdwLen-1);
 
       *pdwLen =
         sk::narrow_cast <uint32_t> (wcslen (buf));
@@ -538,22 +590,46 @@ SK_File_MoveNoFail ( const wchar_t* wszOld, const wchar_t* wszNew )
   HANDLE          hOldFind     =
     FindFirstFile (wszOld, &OldFileData);
 
+  // Nothing to move, leave the destination alone
+  if (hOldFind == INVALID_HANDLE_VALUE)
+    return;
+
+  FindClose (hOldFind);
+
+  const DWORD dwMoveFlags   = MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED;
+  const DWORD dwOrigAttribs = GetFileAttributesW (wszNew);
+
   // Strip read-only if need be
   SK_File_SetNormalAttribs (wszNew);
 
-  if (! MoveFileExW ( wszOld,
-                        wszNew,
-                          MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED ) )
+  bool bMoved =
+    MoveFileExW (wszOld, wszNew, dwMoveFlags);
+
+  if (! bMoved)
   {
     wchar_t wszTemp [MAX_PATH + 2] = { };
     GetTempFileNameW (SK_SYS_GetInstallPath ().c_str (), L"SKI", SK_timeGetTime (), wszTemp);
 
-    MoveFileExW ( wszNew, wszTemp, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED );
-    MoveFileExW ( wszOld, wszNew,  MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED );
+    const bool bMovedAside =
+      MoveFileExW (wszNew, wszTemp, dwMoveFlags);
+
+    bMoved =
+      MoveFileExW (wszOld, wszNew,  dwMoveFlags);
+
+    // Nothing took its place, so it has to go back
+    if ((! bMoved) && bMovedAside)
+      MoveFileExW (wszTemp, wszNew, dwMoveFlags);
+  }
+
+  if (! bMoved)
+  {
+    if (dwOrigAttribs != INVALID_FILE_ATTRIBUTES)
+      SK_File_SetAttribs (wszNew, dwOrigAttribs);
+
+    return;
   }
 
   // Preserve file times
-  if (hOldFind != INVALID_HANDLE_VALUE)
   {
     SK_AutoHandle hNewFile (
       CreateFile ( wszNew,
@@ -565,7 +641,6 @@ SK_File_MoveNoFail ( const wchar_t* wszOld, const wchar_t* wszNew )
                              GetFileAttributes (wszNew),
                                nullptr ) );
 
-    FindClose         (hOldFind);
     SetFileTime       ( hNewFile,
                           &OldFileData.ftCreationTime,
                             &OldFileData.ftLastAccessTime,
@@ -579,35 +654,76 @@ void
 SK_File_FullCopy ( const wchar_t* from,
                    const wchar_t* to )
 {
-  // Strip Read-Only
-  SK_File_SetNormalAttribs (to);
-
-  DeleteFile (      to);
-  CopyFile   (from, to, FALSE);
-
-  WIN32_FIND_DATA FromFileData;
-  HANDLE          hFrom =
+  WIN32_FIND_DATA FromFileData = { };
+  HANDLE          hFrom        =
     FindFirstFile (from, &FromFileData);
 
-  SK_AutoHandle hTo (
-    CreateFile ( to,
-                   GENERIC_READ      | GENERIC_WRITE,
-                     FILE_SHARE_READ | FILE_SHARE_WRITE |
-                                       FILE_SHARE_DELETE,
-                       nullptr,
-                         OPEN_EXISTING,
-                           GetFileAttributes (to),
-                             nullptr )
-  );
+  // Nothing to copy, leave the destination alone
+  if (hFrom == INVALID_HANDLE_VALUE)
+    return;
 
-  // Here's where the magic happens, apply the attributes from the
-  //   original file to the new one!
-  SetFileTime ( hTo.m_h,
-                  &FromFileData.ftCreationTime,
-                    &FromFileData.ftLastAccessTime,
-                      &FromFileData.ftLastWriteTime );
+  FindClose (hFrom);
 
-  FindClose   (hFrom);
+  // Copy to a file beside the destination, which is only replaced
+  //   once there is a complete copy to replace it with.
+  wchar_t     wszDestDir [MAX_PATH + 2] = { };
+  wcsncpy_s ( wszDestDir, MAX_PATH, to, _TRUNCATE );
+
+  PathRemoveFileSpecW (wszDestDir);
+
+  if (*wszDestDir == L'\0')
+    wcscpy_s (wszDestDir, L".");
+
+  wchar_t wszTemp [MAX_PATH + 2] = { };
+
+  if (! GetTempFileNameW (wszDestDir, L"SKI", 0, wszTemp))
+    return;
+
+  bool bCopied =
+    CopyFileW (from, wszTemp, FALSE);
+
+  if (bCopied)
+  {
+    // Only asks for attribute access, because the copy may be Read-Only
+    SK_AutoHandle hTemp (
+      CreateFileW ( wszTemp,
+                      FILE_WRITE_ATTRIBUTES,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE |
+                                          FILE_SHARE_DELETE,
+                          nullptr,
+                            OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL,
+                                nullptr )
+    );
+
+    // Here's where the magic happens, apply the attributes from the
+    //   original file to the new one!
+    SetFileTime ( hTemp.m_h,
+                    &FromFileData.ftCreationTime,
+                      &FromFileData.ftLastAccessTime,
+                        &FromFileData.ftLastWriteTime );
+  }
+
+  if (bCopied)
+  {
+    const DWORD dwOrigAttribs =
+      GetFileAttributesW (to);
+
+    // Strip Read-Only
+    SK_File_SetNormalAttribs (to);
+
+    bCopied =
+      MoveFileExW (wszTemp, to, MOVEFILE_REPLACE_EXISTING);
+
+    if ((! bCopied) && dwOrigAttribs != INVALID_FILE_ATTRIBUTES)
+      SK_File_SetAttribs (to, dwOrigAttribs);
+  }
+
+  if (! bCopied)
+  {
+    SK_File_SetNormalAttribs (wszTemp);
+    DeleteFileW              (wszTemp);
+  }
 }
 
 //BOOL TakeOwnership (LPTSTR lpszOwnFile);
@@ -950,19 +1066,21 @@ struct SK_MemScan_Params__v0
     HeapMemory = SEC_COMMIT
   } mem_type;
 
-  bool testPrivs (const MEMORY_BASIC_INFORMATION& mi)
+  bool testPrivs (const MEMORY_BASIC_INFORMATION& mi) const
   {
     if (mi.AllocationProtect == 0)
       return false;
 
     bool valid = true;
 
+    // Without modifiers such as PAGE_NOCACHE and PAGE_GUARD
+    const DWORD dwProtect = mi.Protect & 0xFF;
 
     if (privileges.execute != DontCare)
     {
       bool exec_matches = true;
 
-      switch (mi.Protect)
+      switch (dwProtect)
       {
         case PAGE_EXECUTE:
         case PAGE_EXECUTE_READ:
@@ -973,7 +1091,7 @@ struct SK_MemScan_Params__v0
           break;
 
         default:
-          if (privileges.execute == Disallowed)
+          if (privileges.execute == Allowed)
             exec_matches = false;
           break;
       }
@@ -986,10 +1104,11 @@ struct SK_MemScan_Params__v0
     {
       bool read_matches = true;
 
-      switch (mi.Protect)
+      switch (dwProtect)
       {
         case PAGE_READONLY:
         case PAGE_READWRITE:
+        case PAGE_WRITECOPY:
         case PAGE_EXECUTE_READ:
         case PAGE_EXECUTE_READWRITE:
         case PAGE_EXECUTE_WRITECOPY:
@@ -998,7 +1117,7 @@ struct SK_MemScan_Params__v0
           break;
 
         default:
-          if (privileges.read == Disallowed)
+          if (privileges.read == Allowed)
             read_matches = false;
           break;
       }
@@ -1011,7 +1130,7 @@ struct SK_MemScan_Params__v0
     {
       bool write_matches = true;
 
-      switch (mi.Protect)
+      switch (dwProtect)
       {
         case PAGE_READWRITE:
         case PAGE_WRITECOPY:
@@ -1022,7 +1141,7 @@ struct SK_MemScan_Params__v0
           break;
 
         default:
-          if (privileges.write == Disallowed)
+          if (privileges.write == Allowed)
             write_matches = false;
           break;
       }
@@ -1046,8 +1165,9 @@ SK_ValidatePointer (LPCVOID addr, bool silent, MEMORY_BASIC_INFORMATION *pmi)
   {
     bFail = false;
 
-    if ((minfo.AllocationProtect == 0 ) ||
-      (  minfo.Protect & PAGE_NOACCESS)   )
+    if ((minfo.State    != MEM_COMMIT) ||
+        (minfo.AllocationProtect == 0) ||
+        (minfo.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
     {
       bFail = true;
     }
@@ -1088,11 +1208,13 @@ SK_IsAddressExecutable (LPCVOID addr, bool silent)
   MEMORY_BASIC_INFORMATION               minfo = { };
   if (SK_ValidatePointer (addr, silent, &minfo))
   {
-    static SK_MemScan_Params__v0 test_exec;
-
-    SK_RunOnce(
-      test_exec.privileges.execute = SK_MemScan_Params__v0::Allowed
-    );
+    static const SK_MemScan_Params__v0
+      test_exec = {
+        .privileges = { .execute = SK_MemScan_Params__v0::Allowed,
+                        .read    = SK_MemScan_Params__v0::DontCare,
+                        .write   = SK_MemScan_Params__v0::DontCare
+                      }
+      };
 
     if (test_exec.testPrivs (minfo))
     {
@@ -1138,7 +1260,7 @@ FindProcessByName (const wchar_t* wszName)
     CreateToolhelp32Snapshot (TH32CS_SNAPPROCESS | TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, 0)
   );
 
-  if ((intptr_t)hProcessSnap.m_h <= 0)// == INVALID_HANDLE_VALUE)
+  if (! hProcessSnap.isValid ())
     return pe32;
 
   pe32.dwSize =
@@ -1159,7 +1281,8 @@ FindProcessByName (const wchar_t* wszName)
        ) return pe32;
   } while (Process32NextW (hProcessSnap, &pe32));
 
-  return pe32;
+  // pe32 still holds the last process enumerated
+  return { };
 }
 
 iSK_INI*
@@ -1324,6 +1447,10 @@ SK_IsCallingDLL ( const wchar_t* const wszModule,
   const HMODULE calling_module =
     SK_GetCallingDLL (pReturn);
 
+  // Would otherwise test the name of the game's executable (i.e. JIT'd caller)
+  if (calling_module == nullptr)
+    return false;
+
   const bool fuzzy_match =
     StrStrIW (
       SK_GetModuleFullName (calling_module).c_str (),
@@ -1336,12 +1463,13 @@ SK_IsCallingDLL ( const wchar_t* const wszModule,
 bool
 SK_IsCallingDLL (HMODULE hModule, LPCVOID pReturn) noexcept
 {
+  // A module that is not loaded cannot be the caller, even if no module is
   return
-    SK_GetCallingDLL (pReturn) == hModule;
+    hModule != nullptr && SK_GetCallingDLL (pReturn) == hModule;
 }
 
-SK_ThreadSuspension_Ctx
-SK_SuspendAllOtherThreads (void)
+static SK_ThreadSuspension_Ctx
+SK_SuspendThreadsExcept (const std::set <DWORD>* pExemptTids)
 {
   SK_ThreadSuspension_Ctx suspension_ctx;
 
@@ -1356,7 +1484,7 @@ SK_SuspendAllOtherThreads (void)
       CreateToolhelp32Snapshot (TH32CS_SNAPTHREAD, 0)
     );
 
-    if ((intptr_t)hSnap.m_h > 0)// != INVALID_HANDLE_VALUE)
+    if (hSnap.isValid ())// != INVALID_HANDLE_VALUE)
     {
       THREADENTRY32 tent        = {                    };
                     tent.dwSize = sizeof (THREADENTRY32);
@@ -1366,31 +1494,45 @@ SK_SuspendAllOtherThreads (void)
         //bool locked =
         //  dll_log.lock ();
 
+        // No thread can be suspended while it owns the process heap's lock if we
+        //   own it, otherwise anything that allocates memory before the threads
+        //     are resumed (including this loop) could deadlock.
+        const HANDLE hProcessHeap = GetProcessHeap ();
+        const bool   bHeapLocked  = HeapLock (hProcessHeap);
+
         do
         {
           if ( tent.dwSize >= FIELD_OFFSET (THREADENTRY32, th32OwnerProcessID) +
                                     sizeof (tent.th32OwnerProcessID) )
           {
-            if ( tent.th32ThreadID       != SK_Thread_GetCurrentId () &&
+            if ( (pExemptTids == nullptr || (! pExemptTids->count (tent.th32ThreadID))) &&
+                 tent.th32ThreadID       != SK_Thread_GetCurrentId () &&
                  tent.th32OwnerProcessID == GetCurrentProcessId    () )
             {
               SK_AutoHandle hThread (
-                OpenThread (THREAD_SUSPEND_RESUME, FALSE, tent.th32ThreadID)
+                OpenThread (THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, tent.th32ThreadID)
               );
 
-              if ((intptr_t)hThread.m_h > 0)
+              if (hThread.isValid ())
               {
-                suspension_ctx.tids.push (tent.th32ThreadID);
+                if (SuspendThread (hThread.m_h) != (DWORD)-1)
+                {
+                  suspension_ctx.tids.push_back (tent.th32ThreadID);
 
-                CONTEXT                         threadContext = { };
-                SuspendThread    (hThread.m_h);
-                GetThreadContext (hThread.m_h, &threadContext);
+                  // SuspendThread is asynchronous, this waits until it has happened
+                  CONTEXT                         threadContext = { };
+                                                  threadContext.ContextFlags = CONTEXT_CONTROL;
+                  GetThreadContext (hThread.m_h, &threadContext);
+                }
               }
             }
           }
 
           tent.dwSize = sizeof (tent);
         } while (Thread32Next (hSnap.m_h, &tent));
+
+        if (bHeapLocked)
+          HeapUnlock (hProcessHeap);
 
         //if (locked)
         //  dll_log.unlock ();
@@ -1402,84 +1544,32 @@ SK_SuspendAllOtherThreads (void)
 }
 
 SK_ThreadSuspension_Ctx
+SK_SuspendAllOtherThreads (void)
+{
+  return
+    SK_SuspendThreadsExcept (nullptr);
+}
+
+SK_ThreadSuspension_Ctx
 SK_SuspendAllThreadsExcept (std::set <DWORD>& exempt_tids)
 {
-  SK_ThreadSuspension_Ctx suspension_ctx;
-
-  suspension_ctx.ldrState  = LDR_LOCK_LOADER_LOCK_DISPOSITION_INVALID;
-  suspension_ctx.ldrCookie = 0x0;
-  
-  if ( STATUS_SUCCESS ==
-         SK_NtLdr_LockLoaderLock ( 0x0,
-           &suspension_ctx.ldrState, &suspension_ctx.ldrCookie ) )
-  {
-    SK_AutoHandle hSnap (
-      CreateToolhelp32Snapshot (TH32CS_SNAPTHREAD, 0)
-    );
-
-    if ((intptr_t)hSnap.m_h > 0)//!= INVALID_HANDLE_VALUE)
-    {
-      THREADENTRY32 tent = {                    };
-      tent.dwSize = sizeof (THREADENTRY32);
-
-      if (Thread32First (hSnap.m_h, &tent))
-      {
-        //bool locked =
-        //  dll_log.lock ();
-
-        do
-        {
-          if (tent.dwSize >= FIELD_OFFSET (THREADENTRY32, th32OwnerProcessID) +
-              sizeof (tent.th32OwnerProcessID))
-          {
-            if ((!exempt_tids.count (tent.th32ThreadID)) &&
-                tent.th32ThreadID != SK_Thread_GetCurrentId () &&
-                tent.th32OwnerProcessID == GetCurrentProcessId ())
-            {
-              SK_AutoHandle hThread (
-                OpenThread (THREAD_SUSPEND_RESUME, FALSE, tent.th32ThreadID)
-              );
-
-              if ((intptr_t)hThread.m_h > 0)
-              {
-                suspension_ctx.tids.push (tent.th32ThreadID);
-
-                CONTEXT                         threadContext = { };
-                SuspendThread (hThread.m_h);
-                GetThreadContext (hThread.m_h, &threadContext);
-              }
-            }
-          }
-
-          tent.dwSize = sizeof (tent);
-        } while (Thread32Next (hSnap.m_h, &tent));
-
-        //if (locked)
-        //  dll_log.unlock ();
-      }
-    }
-  }
-
-  return suspension_ctx;
+  return
+    SK_SuspendThreadsExcept (&exempt_tids);
 }
 
 void
-SK_ResumeThreads (SK_ThreadSuspension_Ctx suspension_ctx)
+SK_ResumeThreads (const SK_ThreadSuspension_Ctx& suspension_ctx)
 {
-  while (! suspension_ctx.tids.empty ())
+  for ( const DWORD tid : suspension_ctx.tids )
   {
-    DWORD tid = suspension_ctx.tids.front ();
-
     SK_AutoHandle hThread (
       OpenThread (THREAD_SUSPEND_RESUME, FALSE, tid)
     );
 
-    if ((intptr_t)hThread.m_h > 0)
+    if (hThread.isValid ())
     {
       ResumeThread (hThread);
     }
-
-    suspension_ctx.tids.pop ();
   }
 
   if (suspension_ctx.ldrState == LDR_LOCK_LOADER_LOCK_DISPOSITION_LOCK_ACQUIRED)
@@ -1687,7 +1777,7 @@ SK_TestImports (          HMODULE  hMod,
       ( pImgBase + pImgDir->VirtualAddress ),
                              end   = reinterpret_cast <PIMAGE_IMPORT_DESCRIPTOR> (
                                      reinterpret_cast <uintptr_t>
-      (    start + pImgDir->Size )                                               );
+      (    start + pImgDir->Size / sizeof (IMAGE_IMPORT_DESCRIPTOR) )            );
 
     static bool bValidIAT = true;
 
@@ -1701,13 +1791,12 @@ SK_TestImports (          HMODULE  hMod,
         {
           if (SK_ValidatePointer (pImpDesc, true))
           {
-            if ( pImpDesc->Characteristics == 0  )
-              break;
-
-            if ( pImpDesc->ForwarderChain != DWORD_MAX ||
-                 pImpDesc->Name           == 0x0 )
+            // Same terminating condition as the loader; OriginalFirstThunk
+            //   (Characteristics) is legitimately 0 in some older linkers' output.
+            if ( pImpDesc->Name       == 0x0 ||
+                 pImpDesc->FirstThunk == 0x0 )
             {
-              continue;
+              break;
             }
           }
 
@@ -1723,7 +1812,7 @@ SK_TestImports (          HMODULE  hMod,
 
         const auto* szImport =
           reinterpret_cast <const char *> (
-            pImgBase + (pImpDesc++)->Name
+            pImgBase + pImpDesc->Name
           );
 
         //dll_log->Log (L"%hs", szImport);
@@ -1775,9 +1864,8 @@ SK_TestImports (          HMODULE  hMod,
   }
   __except (EXCEPTION_EXECUTE_HANDLER) { };
 
-  // We found all of nothing by examining the IAT, so time to try a
-  //   different approach...
-  if (hits == 0)
+  // The import table says nothing about APIs that the game loads dynamically,
+  //   so always supplement it; even if some of the tests were hits.
   {
     i = 0;
 
@@ -1890,16 +1978,16 @@ SK_Path_wcsrchr (const wchar_t* wszStr, wchar_t wchr)
 
   const wchar_t* wszSearch = pwszStr;
 
-  while (wszSearch >= wszStr)
+  while (*wszSearch != wchr)
   {
-    if (*wszSearch == wchr)
-      break;
+    // SK_CharPrevW (...) does not move beyond the start of the string
+    if (wszSearch == wszStr)
+      return nullptr;
 
     wszSearch = SK_CharPrevW (wszStr, wszSearch);
   }
 
-  return (wszSearch < wszStr) ?
-           nullptr : wszSearch;
+  return wszSearch;
 }
 
 const wchar_t*
@@ -2007,9 +2095,9 @@ SK_IsDLLSpecialK (const wchar_t* wszName)
 
   wchar_t wszFullyQualifiedName [MAX_PATH + 2] = { };
 
-  lstrcatW (wszFullyQualifiedName, SK_GetHostPath ());
-  lstrcatW (wszFullyQualifiedName, L"\\");
-  lstrcatW (wszFullyQualifiedName, wszName);
+  // Fails, instead of overflowing, if the result does not fit in MAX_PATH
+  if (! SK_PathCombineW (wszFullyQualifiedName, SK_GetHostPath (), wszName))
+    return false;
 
   BOOL bRet =
     SK_GetFileVersionInfoExW ( FILE_VER_GET_NEUTRAL |
@@ -2539,12 +2627,25 @@ SKX_ScanAlignedEx ( const void* pattern, size_t len,   const void* mask,
   DWORD dwStartTime =
     SK_timeGetTime ();
 
+  // Scan the module that base_addr belongs to, or the game if it has none
+  HMODULE hBaseModule = nullptr;
+
+  if (base_addr != nullptr)
+  {
+    GetModuleHandleExW ( GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT |
+                         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                           (LPCWSTR)base_addr, &hBaseModule );
+  }
+
+  if (hBaseModule == nullptr)
+  {
+    hBaseModule = SK_GetModuleHandle (nullptr);
+    base_addr   = reinterpret_cast <uint8_t *> (hBaseModule);
+  }
+
   MEMORY_BASIC_INFORMATION  minfo = { };
   VirtualQuery (base_addr, &minfo, sizeof (minfo));
 
-           base_addr = static_cast <uint8_t *> (
-                                      (void *)SK_GetModuleHandle (nullptr)
-                                               );
   uint8_t* end_addr  = static_cast <uint8_t *> (    minfo.BaseAddress    ) +
                                                     minfo.RegionSize;
   size_t pages = 0;
@@ -2552,7 +2653,7 @@ SKX_ScanAlignedEx ( const void* pattern, size_t len,   const void* mask,
   MODULEINFO mod_info = { };
 
   GetModuleInformation (
-    GetCurrentProcess (), SK_GetModuleHandle (nullptr), &mod_info, sizeof (mod_info)
+    GetCurrentProcess (), hBaseModule, &mod_info, sizeof (mod_info)
   );
 
   end_addr =
@@ -2627,6 +2728,8 @@ uint8_t* const PAGE_WALK_LIMIT = (base_addr + static_cast <uintptr_t>(1ULL << 36
        sizeof (MODULEINFO) )
   );
 
+  size_t compares = 0;
+
   while (it < end_addr)
   {
     if (use_timeout && SK_timeGetTime () - dwStartTime > _MAX_SEARCH_TIME_IN_MS)
@@ -2648,7 +2751,7 @@ uint8_t* const PAGE_WALK_LIMIT = (base_addr + static_cast <uintptr_t>(1ULL << 36
 
     if ( (! (minfo.Type     & MEM_IMAGE))   ||
        //(! (minfo.State    & MEM_COMMIT))  ||
-             minfo.Protect  & PAGE_NOACCESS ||
+             minfo.Protect  & (PAGE_NOACCESS | PAGE_GUARD) ||
              minfo.Protect == 0             ||
          ( ! params.testPrivs (minfo) )     ||
     
@@ -2665,24 +2768,20 @@ uint8_t* const PAGE_WALK_LIMIT = (base_addr + static_cast <uintptr_t>(1ULL << 36
       it    = next_rgn;
       idx   = 0;
       begin = it;
-    
+
       continue;
     }
 
-    static bool include_end =
-      SK_GetCurrentGameID () == SK_GAME_ID::EldenRing;
-
     // Do not search past the end of the module image!
-    if ((! include_end) ? next_rgn >= end_addr
-                        : next_rgn >  end_addr)
-      break;
+    next_rgn =
+      std::min (next_rgn, end_addr);
 
     while (it < next_rgn)
     {
       if (it == nullptr)
         break;
 
-      if (use_timeout && SK_timeGetTime () - dwStartTime > _MAX_SEARCH_TIME_IN_MS)
+      if (use_timeout && (++compares & 0xFFFF) == 0 && SK_timeGetTime () - dwStartTime > _MAX_SEARCH_TIME_IN_MS)
       {
         SK_LOG0 ( ( L"Pattern search took too long, aborting..." ),
                     L" Sig Scan " );
@@ -2690,74 +2789,42 @@ uint8_t* const PAGE_WALK_LIMIT = (base_addr + static_cast <uintptr_t>(1ULL << 36
       }
 
       uint8_t* scan_addr = it;
+      uint8_t  test_val  = static_cast <const uint8_t *> (pattern)[idx];
+      uint8_t  mask_val  = 0xFF;
 
-      uint8_t test_val = static_cast <const uint8_t *> (pattern)[idx];
-      uint8_t mask_val = 0x0;
+      if (mask != nullptr)
+        mask_val = static_cast <const uint8_t*> (mask)[idx];
 
       bool match = false;
 
-      auto orig_se =
-      SK_SEH_ApplyTranslator (SK_FilteringStructuredExceptionTranslator (EXCEPTION_ACCESS_VIOLATION));
       try {
         match =
-          (*scan_addr == test_val);
+          (*scan_addr == (test_val & mask_val) ||
+                                     mask_val == 0x0);
       }
-
-      catch (const SK_SEH_IgnoredException&) {
-        //continue;
-      }
-      SK_SEH_RemoveTranslator (orig_se);
-
-      if (mask != nullptr)
-      {
-        mask_val = static_cast <const uint8_t *> (mask)[idx];
-
-        // Treat portions we do not care about (mask [idx] == 0) as wildcards.
-        if (! mask_val)
-          match = true;
-
-        else if (match)
-        {
-          // The more complicated case, where the mask is an actual mask :)
-          match = (test_val & mask_val);
-        }
-      }
+      catch (...) {}
 
       if (match)
       {
-        if (++idx == len)
+        if (++idx < len)
         {
-          if ((reinterpret_cast <uintptr_t> (begin) % align) != 0)
-          {
-            begin += idx;
-            begin += align - (reinterpret_cast <uintptr_t> (begin) % align);
-
-            it     = begin;
-            idx    = 0;
-          }
-
-          else
-          {
-            return begin;
-          }
+          ++it;
+          continue;
         }
 
-        else
-          ++it;
+        if ((reinterpret_cast <uintptr_t> (begin) % align) == 0)
+          return begin;
       }
 
-      else
-      {
-        // No match?!
-        if (it > end_addr - len)
-          break;
+      // Every candidate has to be tried, a failed one can overlap the next.
+      begin += align - (reinterpret_cast <uintptr_t> (begin) % align);
 
-        begin += idx;
-        begin += align - (reinterpret_cast <uintptr_t> (begin) % align);
+      it  = begin;
+      idx = 0;
 
-        it  = begin;
-        idx = 0;
-      }
+      // There is no room left for the pattern
+      if (begin > end_addr - len)
+        return nullptr;
     }
   }
 
@@ -2874,7 +2941,7 @@ __stdcall SK_ScanIdaStyle(void* module, const char* pattern)
   while (it < end && VirtualQuery (it, &mbi, sizeof (mbi)))
   {
     // Skip unreadable / non-image memory
-    if (!(mbi.Type & MEM_IMAGE) || (mbi.Protect & PAGE_NOACCESS) ||  mbi.Protect == 0)
+    if (!(mbi.Type & MEM_IMAGE) || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) ||  mbi.Protect == 0)
     {
       it = static_cast<std::uint8_t*> (mbi.BaseAddress) + mbi.RegionSize;
       continue;
@@ -3062,13 +3129,14 @@ SK_RemoveTrailingDecimalZeros (wchar_t* wszNum, size_t bufLen)
                   wcslen (wszNum) :
         std::min (wcslen (wszNum), bufLen);
 
-  for (size_t i = (len - 1); i > 1; i--)
-  {
-    if (wszNum [i] == L'0' && wszNum [i - 1] != L'.')
-      len--;
+  const wchar_t* wszDecimal =
+    wcschr (wszNum, L'.');
 
-    if (wszNum [i] != L'0' && wszNum [i] != L'\0')
-      break;
+  // Always leave one digit following the .
+  if (wszDecimal != nullptr && wszDecimal < wszNum + len)
+  {
+    while (wszNum + len > wszDecimal + 2 && wszNum [len - 1] == L'0')
+      len--;
   }
 
   wszNum [len] = L'\0';
@@ -3087,13 +3155,14 @@ SK_RemoveTrailingDecimalZeros (char* szNum, size_t bufLen)
                   strlen (szNum) :
         std::min (strlen (szNum), bufLen);
 
-  for (size_t i = (len - 1); i > 1; i--)
-  {
-    if (szNum [i] == '0' && szNum [i - 1] != '.')
-      len--;
+  const char* szDecimal =
+    strchr (szNum, '.');
 
-    if (szNum [i] != '0' && szNum [i] != '\0')
-      break;
+  // Always leave one digit following the .
+  if (szDecimal != nullptr && szDecimal < szNum + len)
+  {
+    while (szNum + len > szDecimal + 2 && szNum [len - 1] == '0')
+      len--;
   }
 
   szNum [len] = '\0';
@@ -3190,7 +3259,7 @@ SK_IsSuperSpecialK (void)
 void
 SK_PathRemoveExtension (wchar_t* wszInOut)
 {
-  if (wszInOut == nullptr)
+  if (wszInOut == nullptr || *wszInOut == L'\0')
     return;
 
   wchar_t *wszEnd  = wszInOut,
@@ -3224,9 +3293,13 @@ SK_GetBlacklistFilename (void)
 
   if (! InterlockedCompareExchangeAcquire (&init, TRUE, FALSE))
   {
-    lstrcatW (host_proc.wszBlacklist, SK_GetHostPath ());
-    lstrcatW (host_proc.wszBlacklist, L"\\SpecialK.deny.");
-    lstrcatW (host_proc.wszBlacklist, SK_GetHostApp  ());
+    // A truncated name could not refer to the right file, so leave it empty
+    if (0 > _snwprintf_s ( host_proc.wszBlacklist, MAX_PATH, _TRUNCATE,
+                             LR"(%ws\SpecialK.deny.%ws)",
+                               SK_GetHostPath (), SK_GetHostApp () ))
+    {
+      *host_proc.wszBlacklist = L'\0';
+    }
 
     SK_PathRemoveExtension (host_proc.wszBlacklist);
 
@@ -3425,18 +3498,24 @@ SK_DeleteTemporaryFiles (const wchar_t* wszPath, const wchar_t* wszPattern)
   HANDLE
     hFind = FindFirstFileW (wszFindPattern, &fd);
 
-  if (hFind != INVALID_HANDLE_VALUE && StrStrIW (fd.cFileName, L"SKI"))
+  if (hFind != INVALID_HANDLE_VALUE)
   {
-    if (config.system.log_level >= 0)
-    {
-      dll_log->LogEx ( true, L"[Clean Mgr.] Cleaning temporary files in '%s'...    ",
-                               SK_ConcealUserDir (std::wstring (wszPath).data ()) );
-    }
+    bool bLogged = false;
 
     wchar_t wszFullPath [MAX_PATH + 2] = { };
 
     do
     {
+      // Only our temporary files, whatever else the pattern happens to match
+      if (0 != wcsncmp (fd.cFileName, L"SKI", 3))
+        continue;
+
+      if (config.system.log_level >= 0 && (! std::exchange (bLogged, true)))
+      {
+        dll_log->LogEx ( true, L"[Clean Mgr.] Cleaning temporary files in '%s'...    ",
+                                 SK_ConcealUserDir (std::wstring (wszPath).data ()) );
+      }
+
       if (fd.dwFileAttributes != INVALID_FILE_ATTRIBUTES)
       {
         *wszFullPath = L'\0';
@@ -3453,7 +3532,7 @@ SK_DeleteTemporaryFiles (const wchar_t* wszPath, const wchar_t* wszPattern)
       }
     } while (FindNextFileW (hFind, &fd) != 0);
 
-    if (config.system.log_level >= 0)
+    if (bLogged)
       dll_log->LogEx ( false, L"%zu files deleted\n", files);
 
     FindClose (hFind);
@@ -3499,7 +3578,7 @@ ModifyPrivilege (
                           TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
                           &hToken ))
     {
-        return ERROR_FUNCTION_FAILED;
+        return HRESULT_FROM_WIN32 (GetLastError ());
     }
 
     // Get the local unique ID for the privilege.
@@ -3507,8 +3586,10 @@ ModifyPrivilege (
                                 szPrivilege,
                                 &luid ))
     {
+        hr = HRESULT_FROM_WIN32 (GetLastError ());
+
         SK_CloseHandle( hToken );
-        return ERROR_FUNCTION_FAILED;
+        return hr;
     }
 
     // Assign values to the TOKEN_PRIVILEGE structure.
@@ -3518,14 +3599,22 @@ ModifyPrivilege (
               (fEnable ? SE_PRIVILEGE_ENABLED : 0);
 
     // Adjust the token privilege.
-    if (!AdjustTokenPrivileges(hToken,
-                               FALSE,
-                               &NewState,
-                               0,
-                               nullptr,
-                               nullptr))
+    const BOOL bAdjusted =
+      AdjustTokenPrivileges(hToken,
+                            FALSE,
+                            &NewState,
+                            0,
+                            nullptr,
+                            nullptr);
+
+    // This succeeds if the token does not hold the privilege, the only
+    //   indication is ERROR_NOT_ALL_ASSIGNED.
+    const DWORD dwLastError =
+      GetLastError ();
+
+    if ((! bAdjusted) || dwLastError == ERROR_NOT_ALL_ASSIGNED)
     {
-        hr = ERROR_FUNCTION_FAILED;
+        hr = HRESULT_FROM_WIN32 (dwLastError);
     }
 
     // Close the handle.
@@ -3535,107 +3624,139 @@ ModifyPrivilege (
 }
 
 
+// Builds "BASE~N.EXT" from the characters in wszName that are valid in an 8.3 name
+static void
+SK_Build8Dot3Name (const wchar_t* wszName, bool dir, int idx, wchar_t (&wsz8Dot3)[14])
+{
+  wchar_t* wszOut = wsz8Dot3;
+
+  auto _AppendValid =
+  [&](const wchar_t* wszBegin, const wchar_t* wszEnd, int max_chars) -> int
+  {
+    int count = 0;
+
+    for ( ; wszBegin < wszEnd && count < max_chars ; ++wszBegin )
+    {
+      const wchar_t ch =
+        (*wszBegin >= L'a' && *wszBegin <= L'z') ? *wszBegin - (L'a' - L'A')
+                                                 : *wszBegin;
+
+      if ( (ch >= L'A' && ch <= L'Z') ||
+           (ch >= L'0' && ch <= L'9') || (ch != L'\0' && wcschr (L"$%'-_@`!(){}^#&", ch)) )
+      {
+        *wszOut++ = ch;
+         count++;
+      }
+    }
+
+    return count;
+  };
+
+  const wchar_t* wszNameEnd = wszName + wcslen (wszName);
+  const wchar_t* wszExt     = dir ? wszNameEnd
+                                  : PathFindExtensionW (wszName);
+
+  // Names without a single valid character are possible (i.e. Japanese)
+  if (_AppendValid (wszName, wszExt, 6) == 0)
+  {
+    *wszOut++ = L'S';
+    *wszOut++ = L'K';
+  }
+
+  *wszOut++ = L'~';
+  *wszOut++ = sk::narrow_cast <wchar_t> (L'0' + idx);
+
+  if (wszExt < wszNameEnd)
+  {
+    wchar_t* wszDot = wszOut;
+    *wszOut++ = L'.';
+
+    if (_AppendValid (wszExt + 1, wszNameEnd, 3) == 0)
+      wszOut = wszDot;
+  }
+
+  *wszOut = L'\0';
+}
+
+// Gives a short name to every part of a path that has a space in it and no short
+//   name already. This changes the filesystem, requires admin privileges and is
+//     not possible on volumes that have 8.3 name support disabled.
 bool
 SK_Generate8Dot3 (const wchar_t* wszLongFileName)
 {
-  wchar_t wszFileName  [MAX_PATH] = { };
-  wchar_t wszFileName1 [MAX_PATH] = { };
+  wchar_t wszPath [MAX_PATH + 2] = { };
 
-  PathCombineW (wszFileName, wszLongFileName,  nullptr);
-  PathCombineW (wszFileName1, wszLongFileName, nullptr);
+  if (! PathCombineW (wszPath, wszLongFileName, nullptr))
+    return false;
 
-  wchar_t  wsz8     [11] = { }; // One non-nul for overflow
-  wchar_t  wszDot3  [ 4] = { };
-  wchar_t  wsz8Dot3 [14] = { };
+  bool bHasPrivileges = false;
 
-  while (SK_FileHasSpaces (wszFileName))
+  PathRemoveBackslashW (wszPath);
+
+  while (SK_FileHasSpaces (wszPath))
   {
-    ModifyPrivilege (SE_RESTORE_NAME, TRUE);
-    ModifyPrivilege (SE_BACKUP_NAME,  TRUE);
+    const wchar_t* wszName =
+      PathFindFileNameW (wszPath);
 
-    SK_AutoHandle hFile (
-      CreateFileW ( wszFileName,
-                      GENERIC_WRITE      | DELETE,
-                        FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                          nullptr,
-                            OPEN_EXISTING,
-                              FILE_FLAG_BACKUP_SEMANTICS,
-                                nullptr ) );
+    wchar_t wszShortPath [MAX_PATH + 2] = { };
 
-    if ((intptr_t)hFile.m_h <= 0)
-    {
+    if (! GetShortPathNameW (wszPath, wszShortPath, MAX_PATH))
       return false;
-    }
 
-    DWORD dwAttrib =
-      GetFileAttributes (wszFileName);
-
-    if (dwAttrib == INVALID_FILE_ATTRIBUTES)
+    // A part of the path without spaces does not need a short name (it might not
+    //   even be possible to open for write access, as with a DLL that is loaded).
+    if (SK_FileHasSpaces (wszName) &&
+        SK_FileHasSpaces (PathFindFileNameW (wszShortPath)))
     {
-      return false;
-    }
-
-    bool dir = false;
-
-    if (dwAttrib & FILE_ATTRIBUTE_DIRECTORY)
-    {
-      dir = true;
-    }
-
-    else
-    {
-      dir = false;
-
-      const wchar_t* pwszExt =
-        PathFindExtension (wszFileName);
-
-      if (pwszExt != nullptr && *pwszExt == L'.')
+      if (! std::exchange (bHasPrivileges, true))
       {
-        swprintf (wszDot3, L"%3s", SK_CharNextW (pwszExt));
+        ModifyPrivilege (SE_RESTORE_NAME, TRUE);
+        ModifyPrivilege (SE_BACKUP_NAME,  TRUE);
       }
 
-      PathRemoveExtension (wszFileName);
-    }
+      SK_AutoHandle hFile (
+        CreateFileW ( wszPath,
+                        GENERIC_WRITE     | DELETE,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE |
+                                            FILE_SHARE_DELETE,
+                            nullptr,
+                              OPEN_EXISTING,
+                                FILE_FLAG_BACKUP_SEMANTICS,
+                                  nullptr ) );
 
-    PathStripPath       (wszFileName);
-    PathRemoveBackslash (wszFileName);
-    PathRemoveBlanks    (wszFileName);
+      if ((intptr_t)hFile.m_h <= 0)
+        return false;
 
-    wcsncpy_s (wsz8, 11, wszFileName, _TRUNCATE);
+      const DWORD dwAttrib =
+        GetFileAttributesW (wszPath);
 
-    wchar_t idx = 0;
+      if (dwAttrib == INVALID_FILE_ATTRIBUTES)
+        return false;
 
-    if (wcslen (wsz8) > 8)
-    {
-      wsz8 [6] = L'~';
-      wsz8 [7] = L'0';
-      wsz8 [8] = L'\0';
+      const bool dir =
+        (dwAttrib & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
-      swprintf (wsz8Dot3, dir ? L"%s" : L"%s.%s", wsz8, wszDot3);
+      bool bSuccess = false;
 
-      while ((! SetFileShortNameW (hFile, wsz8Dot3)) && idx < 9)
+      for ( int idx = 1 ; idx <= 9 && (! bSuccess) ; ++idx )
       {
-        wsz8 [6] = L'~';
-        wsz8 [7] = L'0' + idx++;
-        wsz8 [8] = L'\0';
+        wchar_t                                wsz8Dot3 [14] = { };
+        SK_Build8Dot3Name (wszName, dir, idx,  wsz8Dot3);
 
-        swprintf (wsz8Dot3, dir ? L"%s" : L"%s.%s", wsz8, wszDot3);
+        bSuccess =
+          SetFileShortNameW (hFile, wsz8Dot3);
+
+        // Only a name collision is worth trying again
+        if ((! bSuccess) && GetLastError () != ERROR_ALREADY_EXISTS)
+          return false;
       }
+
+      if (! bSuccess)
+        return false;
     }
 
-    else
-    {
-      swprintf (wsz8Dot3, dir ? L"%s" : L"%s.%s", wsz8, wszDot3);
-    }
-
-    if (idx == 9)
-    {
-      return false;
-    }
-
-    PathRemoveFileSpec (wszFileName1);
-    wcsncpy_s          (wszFileName,   MAX_PATH,
-                        wszFileName1, _TRUNCATE);
+    if (! PathRemoveFileSpecW (wszPath))
+      break;
   }
 
   return true;
@@ -3659,13 +3780,8 @@ SK_CanRestartGame (void)
       wcsncpy_s ( wszFullname, MAX_PATH,
                   SK_GetModuleFullName ( SK_GetDLL () ).c_str (),
                               _TRUNCATE );
-    
-      wchar_t                         wszCurDir
-                           [MAX_PATH + 2] = {  };
-      GetCurrentDirectoryW (MAX_PATH, wszCurDir);
-    
-      SK_Generate8Dot3 (wszCurDir);
-      SK_Generate8Dot3 (wszFullname);
+
+      // This only tests, SK_RestartGame (...) will generate short names if needed
       wcsncpy_s        (wszShortPath, MAX_PATH, wszFullname, _TRUNCATE);
     
       if (SK_FileHasSpaces (wszFullname))
@@ -3696,7 +3812,8 @@ SK_CanRestartGame (void)
                     wcsncpy_s ( wszFullname, MAX_PATH, global_dll.c_str (), _TRUNCATE );
           GetShortPathName    ( wszFullname, wszShortPath,                   MAX_PATH );
     
-          if (SK_FileHasSpaces (wszShortPath))
+          // Generating a short name requires admin
+          if (SK_FileHasSpaces (wszShortPath) && (! SK_IsAdmin ()))
           {
             can_restart = false;
           }
@@ -3761,7 +3878,7 @@ SK_RestartGame (const wchar_t* wszDLL, const wchar_t* wszFailMsg)
       GetShortPathName    ( wszFullname, wszShortPath,                   MAX_PATH );
 
       //if (SK_FileHasSpaces (wszShortPath))
-      // 
+      //
       //{
       //  if (wszFailMsg == nullptr)
       //    SK_ImGui_Warning (L"Could not restart due to missing DOS 8.3 filename support");
@@ -3769,20 +3886,17 @@ SK_RestartGame (const wchar_t* wszDLL, const wchar_t* wszFailMsg)
       //    SK_ImGui_Warning (wszFailMsg);
       //  return;
       //}
-      UNREFERENCED_PARAMETER (wszFailMsg);
     }
   }
 
-  SK_Inject_SuppressExitNotify ();
-
   if (! SK_IsSuperSpecialK ())
   {
-    wchar_t      wszRunDLLCmd [MAX_PATH * 4] = { };
-    swprintf_s ( wszRunDLLCmd, MAX_PATH * 4 - 1,
-                 L"RunDll32.exe \"%ws\",RunDLL_RestartGame %ws %ws",
-                   wszShortPath,
-                     SK_GetFullyQualifiedApp (),
-                     PathGetArgsW (GetCommandLineW ()) );
+    // Not a fixed-size buffer; some launchers pass very long command lines
+    std::wstring wszRunDLLCmd =
+      SK_FormatStringW ( L"RunDll32.exe \"%ws\",RunDLL_RestartGame \"%ws\" %ws",
+                           wszShortPath,
+                             SK_GetFullyQualifiedApp (),
+                             PathGetArgsW (GetCommandLineW ()) );
 
     STARTUPINFOW        sinfo = { };
     PROCESS_INFORMATION pinfo = { };
@@ -3791,20 +3905,32 @@ SK_RestartGame (const wchar_t* wszDLL, const wchar_t* wszFailMsg)
     sinfo.wShowWindow = SW_HIDE;
     sinfo.dwFlags     = STARTF_USESHOWWINDOW;
 
-    CreateProcess ( nullptr, wszRunDLLCmd,     nullptr, nullptr,
-                    FALSE,   CREATE_SUSPENDED, nullptr, SK_GetHostPath (),
-                    &sinfo,  &pinfo );
-
-    if (pinfo.hProcess != 0)
+    // Nothing would bring the game back, so it has to keep running
+    if (! CreateProcess ( nullptr, wszRunDLLCmd.data (), nullptr, nullptr,
+                          FALSE,   CREATE_SUSPENDED,     nullptr, SK_GetHostPath (),
+                          &sinfo,  &pinfo ))
     {
-      // Save config prior to committing suicide
-      SK_SelfDestruct ();
+      SK_LOGi0 ( L"Could not start RunDll32 to restart the game (Error=%d)",
+                   GetLastError () );
 
-      ResumeThread   (pinfo.hThread);
-      SK_CloseHandle (pinfo.hThread);
-      SK_CloseHandle (pinfo.hProcess);
+      SK_ImGui_Warning ( wszFailMsg != nullptr ? wszFailMsg
+                                               : L"The game could not be restarted." );
+
+      return;
     }
+
+    SK_Inject_SuppressExitNotify ();
+
+    // Save config prior to committing suicide
+    SK_SelfDestruct ();
+
+    ResumeThread   (pinfo.hThread);
+    SK_CloseHandle (pinfo.hThread);
+    SK_CloseHandle (pinfo.hProcess);
   }
+
+  else
+    SK_Inject_SuppressExitNotify ();
 
   SK_TerminateProcess (0x00);
 }
@@ -4496,33 +4622,29 @@ size_t
 __cdecl
 SK_FormatStringView (std::string_view& out, char const* const _Format, ...)
 {
+  if (out.empty ())
+    return 0;
+
   int len = 0;
 
   va_list   _ArgList;
   va_start (_ArgList, _Format);
   {
     len =
-      vsnprintf (nullptr, 0, _Format, _ArgList);
+      vsnprintf ((char *)out.data (), out.size (), _Format, _ArgList);
   }
   va_end   (_ArgList);
 
-  len =
-    std::min (
-      std::max (0, len + 1),
-         (int)out.size () );
-
-  va_start (_ArgList, _Format);
-  {
-    len =
-      vsnprintf ((char *)out.data (), len, _Format, _ArgList);
-  }
-  va_end (_ArgList);
-
+  // Negative means an encoding error (not truncation) and the output is unusable
   if (len < 0)
-      len = (int)out.size () - 1;
+      len = 0;
 
-  ((char *)out.data ())[(size_t)len] = '\0';
-  return                (size_t)len;
+  // On truncation, this is the length that was needed rather than what was written
+  const size_t written =
+    std::min ((size_t)len, out.size () - 1);
+
+  ((char *)out.data ())[written] = '\0';
+  return                written;
 }
 
 std::wstring
@@ -4569,6 +4691,9 @@ size_t
 __cdecl
 SK_FormatStringViewW (std::wstring_view& out, wchar_t const* const _Format, ...)
 {
+  if (out.empty ())
+    return 0;
+
   int len = 0;
 
   va_list   _ArgList;
@@ -4578,6 +4703,14 @@ SK_FormatStringViewW (std::wstring_view& out, wchar_t const* const _Format, ...)
       _vsnwprintf (nullptr, 0, _Format, _ArgList);
   }
   va_end (_ArgList);
+
+  // There is no truncation to a buffer that does not exist, so this is an encoding
+  //   error and anything already in the buffer must not be mistaken for the output.
+  if (len < 0)
+  {
+    ((wchar_t *)out.data ())[0] = L'\0';
+    return 0;
+  }
 
   len =
     std::min (
@@ -4591,7 +4724,8 @@ SK_FormatStringViewW (std::wstring_view& out, wchar_t const* const _Format, ...)
   }
   va_end (_ArgList);
 
-  if (len < 0)
+  // Truncated: -1, unless the output was exactly as long as the buffer
+  if (len < 0 || len >= (int)out.size ())
       len = (int)out.size () - 1;
 
   ((wchar_t *)out.data ())[(size_t)len] = L'\0';
@@ -4630,22 +4764,8 @@ SK_StripLeadingSlashesW (wchar_t *wszInOut)
 
   if (len != new_len)
   {
-    wchar_t *wszOut = wszInOut;
-    wchar_t *wszIn  = wszStart;
-
-    for ( size_t i = 0 ; i < new_len ; ++i )
-    {
-      *wszOut =           *wszIn;
-
-      if (*wszOut == L'\0')
-        break;
-
-      wszIn  = SK_CharNextW (wszIn);
-      wszOut = SK_CharNextW (wszOut);
-    }
-
-    if (*wszOut != L'\0')
-      *SK_CharNextW (wszOut) = L'\0';
+    // Includes the null-terminator
+    wmemmove (wszInOut, wszStart, new_len + 1);
   }
 
   // Else:
@@ -4827,9 +4947,10 @@ SK_GetUserNameExW (
 
 // Doesn't need to be this complicated; it's a string function, might as well optimize it.
 
-static char     szUserName        [MAX_PATH + 2] = { };
-static char     szUserNameDisplay [MAX_PATH + 2] = { };
-static char     szUserProfile     [MAX_PATH + 2] = { }; // Most likely to match
+// Callers pass both UTF-8 and ANSI paths, so narrow names are kept in both encodings
+static char     szUserName        [2][MAX_PATH + 2] = { };
+static char     szUserNameDisplay [2][MAX_PATH + 2] = { };
+static char     szUserProfile     [2][MAX_PATH + 2] = { };
 static wchar_t wszUserName        [MAX_PATH + 2] = { };
 static wchar_t wszUserNameDisplay [MAX_PATH + 2] = { };
 static wchar_t wszUserProfile     [MAX_PATH + 2] = { }; // Most likely to match
@@ -4837,93 +4958,89 @@ static wchar_t wszUserProfile     [MAX_PATH + 2] = { }; // Most likely to match
 char*
 SK_StripUserNameFromPathA (char* szInOut)
 {
-  if (*szUserProfile == '\0')
+  // A failed lookup caches '?' (Invalid filesystem char) so that it is not retried.
+  //
+  //  * These cannot be initialized by a function-local static; the lookups may load
+  //      DLLs, which re-enters this function through the LoadLibrary hooks.
+  auto _CacheName =
+  [](char (&szName)[2][MAX_PATH + 2], const wchar_t* wszName)
   {
-                                        uint32_t len = MAX_PATH;
-    if (! SK_GetUserProfileDir (wszUserProfile, &len))
-      *wszUserProfile = L'?'; // Invalid filesystem char
-    else
-      PathStripPathW (wszUserProfile);
+    if (*wszName == L'\0')
+        wszName = L"?";
 
-    strncpy_s ( szUserProfile, MAX_PATH,
-                  SK_WideCharToUTF8 (wszUserProfile).c_str (), _TRUNCATE );
+    BOOL bLossy = FALSE;
+
+    if ( 0 == WideCharToMultiByte ( CP_ACP, 0, wszName, -1, szName [1],
+                                      MAX_PATH, nullptr, &bLossy ) || bLossy )
+    {
+      strncpy_s (szName [1], MAX_PATH, "?", _TRUNCATE);
+    }
+
+    strncpy_s ( szName [0], MAX_PATH,
+                  SK_WideCharToUTF8 (wszName).c_str (), _TRUNCATE );
+  };
+
+  if (**szUserProfile == '\0')
+  {
+    wchar_t wszName [MAX_PATH + 2] = { };
+
+                                 uint32_t len = MAX_PATH;
+    if (SK_GetUserProfileDir (wszName, &len))
+      PathStripPathW (wszName);
+    else
+      *wszName = L'\0';
+
+    _CacheName (szUserProfile, wszName);
   }
 
-  if (*szUserName == '\0')
+  if (**szUserName == '\0')
   {
+    wchar_t wszName [MAX_PATH + 2] = { };
+
+                                                 DWORD dwLen = MAX_PATH;
+    if (SK_GetUserNameExW (NameSamCompatible, wszName, &dwLen))
+      PathStripPathW (wszName);
+    else
+      *wszName = L'\0';
+
+    _CacheName (szUserName, wszName);
+  }
+
+  if (**szUserNameDisplay == '\0')
+  {
+    wchar_t wszName [MAX_PATH + 2] = { };
+
                                            DWORD dwLen = MAX_PATH;
-    SK_GetUserNameExA (NameUnknown, szUserName, &dwLen);
+    if (! SK_GetUserNameExW (NameDisplay, wszName, &dwLen))
+      *wszName = L'\0';
 
-    if (dwLen == 0)
-      *szUserName = '?'; // Invalid filesystem char
-    else
-      PathStripPathA (szUserName);
+    _CacheName (szUserNameDisplay, wszName);
   }
 
-  if (*szUserNameDisplay == '\0')
+  const char* szNames [] = {
+    szUserProfile     [0], szUserProfile     [1],
+    szUserNameDisplay [0], szUserNameDisplay [1],
+    szUserName        [0], szUserName        [1]
+  };
+
+  // Longest first, or masking "Bob" would leave the rest of "Bob Smith" behind
+  std::sort ( std::begin (szNames), std::end (szNames),
+    [](const char* szA, const char* szB) { return strlen (szA) > strlen (szB); } );
+
+  for ( const char* szName : szNames )
   {
-                                                  DWORD dwLen = MAX_PATH;
-    SK_GetUserNameExA (NameDisplay, szUserNameDisplay, &dwLen);
+    const size_t len =
+      strlen (szName);
 
-    if (dwLen == 0)
-      *szUserNameDisplay = '?'; // Invalid filesystem char
-  }
+    if (len == 0 || *szName == '?')
+      continue;
 
-  char* pszUserNameSubstr =
-    StrStrIA (szInOut, szUserProfile);
-
-  if (pszUserNameSubstr != nullptr)
-  {
-    static const size_t len =
-      strlen (szUserProfile);
-
-    for (size_t i = 0; i < len; i++)
+    for ( char* pszUserNameSubstr  = StrStrIA (szInOut, szName);
+                pszUserNameSubstr != nullptr;
+                pszUserNameSubstr  = StrStrIA (pszUserNameSubstr + len, szName) )
     {
-      *pszUserNameSubstr = '*';
-       pszUserNameSubstr = CharNextA (pszUserNameSubstr);
-
-       if (pszUserNameSubstr == nullptr) break;
+      memset (pszUserNameSubstr, '*', len);
     }
-
-    return szInOut;
-  }
-
-  pszUserNameSubstr =
-    StrStrIA (szInOut, szUserNameDisplay);
-
-  if (pszUserNameSubstr != nullptr)
-  {
-    static const size_t len =
-      strlen (szUserNameDisplay);
-
-    for (size_t i = 0; i < len; i++)
-    {
-      *pszUserNameSubstr = '*';
-       pszUserNameSubstr = CharNextA (pszUserNameSubstr);
-
-       if (pszUserNameSubstr == nullptr) break;
-    }
-
-    return szInOut;
-  }
-
-  pszUserNameSubstr =
-    StrStrIA (szInOut, szUserName);
-
-  if (pszUserNameSubstr != nullptr)
-  {
-    static const size_t len =
-      strlen (szUserName);
-
-    for (size_t i = 0; i < len; i++)
-    {
-      *pszUserNameSubstr = '*';
-       pszUserNameSubstr = CharNextA (pszUserNameSubstr);
-
-       if (pszUserNameSubstr == nullptr) break;
-    }
-
-    return szInOut;
   }
 
   return szInOut;
@@ -4936,29 +5053,35 @@ SK_StripUserNameFromPathW (wchar_t* wszInOut)
   {
                                         uint32_t len = MAX_PATH;
     if (! SK_GetUserProfileDir (wszUserProfile, &len))
-      *wszUserProfile = L'?'; // Invalid filesystem char
+      *wszUserProfile = L'\0';
     else
       PathStripPathW (wszUserProfile);
+
+    // A failed lookup caches '?' (Invalid filesystem char) so that it is not retried
+    if (*wszUserProfile == L'\0')
+      wcscpy_s (wszUserProfile, L"?");
   }
 
   if (*wszUserName == L'\0')
   {
-                                                  DWORD dwLen = MAX_PATH;
-    SK_GetUserNameExW (NameSamCompatible, wszUserName, &dwLen);
-
-    if (dwLen == 0)
-      *wszUserName = L'?'; // Invalid filesystem char
+                                                       DWORD dwLen = MAX_PATH;
+    if (! SK_GetUserNameExW (NameSamCompatible, wszUserName, &dwLen))
+      *wszUserName = L'\0';
     else
       PathStripPathW (wszUserName);
+
+    if (*wszUserName == L'\0')
+      wcscpy_s (wszUserName, L"?");
   }
 
   if (*wszUserNameDisplay == L'\0')
   {
-                                                   DWORD dwLen = MAX_PATH;
-    SK_GetUserNameExW (NameDisplay, wszUserNameDisplay, &dwLen);
+                                                        DWORD dwLen = MAX_PATH;
+    if (! SK_GetUserNameExW (NameDisplay, wszUserNameDisplay, &dwLen))
+      *wszUserNameDisplay = L'\0';
 
-    if (dwLen == 0)
-      *wszUserNameDisplay = L'?'; // Invalid filesystem char
+    if (*wszUserNameDisplay == L'\0')
+      wcscpy_s (wszUserNameDisplay, L"?");
   }
 
   if (config.system.log_level > 4)
@@ -4970,61 +5093,28 @@ SK_StripUserNameFromPathW (wchar_t* wszInOut)
   }
 
 
-  wchar_t* pwszUserNameSubstr =
-    StrStrIW (wszInOut, wszUserProfile);
+  const wchar_t* wszNames [] = {
+    wszUserProfile, wszUserNameDisplay, wszUserName
+  };
 
-  if (pwszUserNameSubstr != nullptr)
+  // Longest first, or masking "Bob" would leave the rest of "Bob Smith" behind
+  std::sort ( std::begin (wszNames), std::end (wszNames),
+    [](const wchar_t* wszA, const wchar_t* wszB) { return wcslen (wszA) > wcslen (wszB); } );
+
+  for ( const wchar_t* wszName : wszNames )
   {
-    static const size_t len =
-      wcslen (wszUserProfile);
+    const size_t len =
+      wcslen (wszName);
 
-    for (size_t i = 0; i < len; i++)
+    if (len == 0 || *wszName == L'?')
+      continue;
+
+    for ( wchar_t* pwszUserNameSubstr  = StrStrIW (wszInOut, wszName);
+                   pwszUserNameSubstr != nullptr;
+                   pwszUserNameSubstr  = StrStrIW (pwszUserNameSubstr + len, wszName) )
     {
-      *pwszUserNameSubstr = L'*';
-       pwszUserNameSubstr = SK_CharNextW (pwszUserNameSubstr);
-
-       if (pwszUserNameSubstr == nullptr) break;
+      wmemset (pwszUserNameSubstr, L'*', len);
     }
-
-    return wszInOut;
-  }
-
-  pwszUserNameSubstr =
-    StrStrIW (wszInOut, wszUserNameDisplay);
-
-  if (pwszUserNameSubstr != nullptr)
-  {
-    static const size_t len =
-      wcslen (wszUserNameDisplay);
-
-    for (size_t i = 0; i < len; i++)
-    {
-      *pwszUserNameSubstr = L'*';
-       pwszUserNameSubstr = SK_CharNextW (pwszUserNameSubstr);
-
-       if (pwszUserNameSubstr == nullptr) break;
-    }
-
-    return wszInOut;
-  }
-
-  pwszUserNameSubstr =
-    StrStrIW (wszInOut, wszUserName);
-
-  if (pwszUserNameSubstr != nullptr)
-  {
-    static const size_t len =
-      wcslen (wszUserName);
-
-    for (size_t i = 0; i < len; i++)
-    {
-      *pwszUserNameSubstr = L'*';
-       pwszUserNameSubstr = SK_CharNextW (pwszUserNameSubstr);
-
-       if (pwszUserNameSubstr == nullptr) break;
-    }
-
-    return wszInOut;
   }
 
   return wszInOut;
@@ -5162,7 +5252,7 @@ SK_GetCanonicalDLLForRole (DLL_ROLE role)
     case DLL_ROLE::OpenGL:
       return L"OpenGL32.dll";
     case DLL_ROLE::Vulkan:
-      return L"vk-1.dll";
+      return L"vulkan-1.dll";
     case DLL_ROLE::DInput8:
       return L"dinput8.dll";
     default:
@@ -5825,15 +5915,14 @@ SK_timeGetTime (void) noexcept
     winmm_timeGetTime ();
 }
 
-float
+double
 WINAPI
 SK_timeGetTimeFloat (void) noexcept
 {
   LARGE_INTEGER                    qpcNow;
   if (SK_QueryPerformanceCounter (&qpcNow))
-    return (float)
-             static_cast <double> (qpcNow.QuadPart /
-                  SK_QpcTicksPerMs);
+    return ( static_cast <double> (qpcNow.QuadPart) /
+             static_cast <double> (SK_QpcTicksPerMs) );
 
 
   static HMODULE hModWinMM =
@@ -5846,7 +5935,7 @@ SK_timeGetTimeFloat (void) noexcept
         "timeGetTime"                      );
 
   return
-    (float)winmm_timeGetTime ();
+    (double)winmm_timeGetTime ();
 }
 
 BOOL
@@ -6171,4 +6260,65 @@ SK_AppX_GetCurrentPackageFamilyName (void)
 
   return wszPackageFamilyName [0] != L'\0'    ?
     std::make_optional (wszPackageFamilyName) : std::nullopt;
+}
+
+std::vector <std::pair <std::wstring, std::wstring>>
+SK_Win32_ParseEnvVarsFromStr (const std::wstring& input)
+{
+  std::vector <std::pair <std::wstring, std::wstring>> env_var_pairs;
+
+  static constexpr auto whitespace = L" \t\r\n";
+
+  auto trim = [](std::wstring_view str) -> std::wstring_view
+  {
+    const size_t first = str.find_first_not_of (whitespace);
+
+    if (first == std::wstring_view::npos)
+      return { };
+
+    return
+      str.substr (first, str.find_last_not_of (whitespace) - first + 1);
+  };
+
+  std::wstring entry;
+
+  auto flushEntry = [&]()
+  {
+    const std::wstring_view view (entry);
+    const size_t            sep = view.find (L'=');
+
+    if (sep != std::wstring_view::npos)
+    {
+      const auto name  = trim (view.substr (0, sep));
+      const auto value = trim (view.substr (sep + 1));
+
+      // Entries without a name are ignored.
+      if (! name.empty ())
+      {
+        env_var_pairs.emplace_back (name, value);
+      }
+    }
+
+    entry.clear ();
+  };
+
+  for (size_t i = 0; i < input.size (); ++i)
+  {
+    if (input [i] != L'|')
+      entry.push_back (input [i]);
+
+    // Two pipes in a row is an escaped pipe character.
+    else if (i + 1 < input.size () && input [i + 1] == L'|')
+    {
+      entry.push_back (L'|');
+      ++i;
+    }
+
+    else
+      flushEntry ();
+  }
+
+  flushEntry ();
+
+  return env_var_pairs;
 }

@@ -526,11 +526,12 @@ SK_GetCurrentGameID (void) noexcept
           {
             SK_SEH_LaunchEldenRing (L"nightreign.exe");
           }
-
+#ifdef _M_IX86
           else if (std::filesystem::exists (L"armoredcore6.exe", ec))
           {
             SK_SEH_LaunchArmoredCoreVI ();
           }
+#endif
 
           else if (std::filesystem::exists (LR"(LOTF2\Binaries\Win64\LOTF2-Win64-Shipping.exe)", ec))
           {
@@ -1362,6 +1363,7 @@ struct {
   sk::ParameterBool*      reshade_mode            = nullptr;
   sk::ParameterInt*       sdl_sanity_level        = nullptr;
   sk::ParameterInt*       debug_level             = nullptr;
+  sk::ParameterStringW*   environment_variables   = nullptr;
   struct {
     sk::ParameterInt*     allow_wgi               = nullptr;
     sk::ParameterInt*     allow_raw_input         = nullptr;
@@ -2060,6 +2062,9 @@ auto DeclKeybind =
     ConfigEntry (compatibility.async_init,               L"Runs hook initialization on a separate thread; high safety",dll_ini,         L"Compatibility.General", L"AsyncInit"),
     ConfigEntry (compatibility.reshade_mode,             L"Initializes hooks in a way that ReShade will not interfere",dll_ini,         L"Compatibility.General", L"ReShadeMode"),
     ConfigEntry (compatibility.debug_level,              L"Debug Level (0=Most debug code OFF, >0=Normal behavior)",   dll_ini,         L"Compatibility.General", L"DebugLevel"),
+    ConfigEntry (compatibility.environment_variables,    L"Environment Variables (delimited by |, use || for vars "
+                                                         L"that must contain |) to set; usually too late for games "
+                                                         L"to notice, and is intended to control mods/overlays.",      dll_ini,         L"Compatibility.General", L"EnvironmentVars"),
     ConfigEntry (compatibility.sdl_sanity_level,         L"Set Default (1) or Override (2) SDL input/window behavior.",dll_ini,         L"Compatibility.General", L"SDLSanityLevel"),
     // Refer to SDL_hints.h, only the most useful options are exposed here...
     ConfigEntry (compatibility.sdl.allow_wgi,            L"SDL_JOYSTICK_WGI",                                          dll_ini,         L"Compatibility.SDL",     L"SDL_JOYSTICK_WGI"),
@@ -2660,7 +2665,7 @@ auto DeclKeybind =
 
         import_.hLibrary = nullptr;
 
-        if (++import_idx > SK_MAX_IMPORTS)
+        if (++import_idx >= SK_MAX_IMPORTS)
           break;
       }
 
@@ -3210,6 +3215,11 @@ auto DeclKeybind =
         // Don't accidentally hook the D3D9 device used for video playback
         config.apis.d3d9.hook   = false;
         config.apis.d3d9ex.hook = false;
+        config.apis.OpenGL.hook =  true;
+
+        apis.d3d9.hook->store   (config.apis.d3d9.  hook);
+        apis.d3d9ex.hook->store (config.apis.d3d9ex.hook);
+        apis.OpenGL.hook->store (config.apis.OpenGL.hook);
         break;
 
       case SK_GAME_ID::Ys_Eight:
@@ -4862,6 +4872,20 @@ auto DeclKeybind =
   if ((debug_level & 0xffffffff) == 0)
     config.compatibility.disable_debug_features = true;
 
+                                             config.compatibility.environment_variables = L"";
+  compatibility.environment_variables->load (config.compatibility.environment_variables);
+
+  if (! config.compatibility.environment_variables.empty ())
+  {
+    const auto env_vars =
+      SK_Win32_ParseEnvVarsFromStr (config.compatibility.environment_variables);
+
+    for (const auto& env_var : env_vars) {
+      SetEnvironmentVariableW (env_var.first .c_str (),
+                               env_var.second.c_str ());
+    }
+  }
+
   compatibility.sdl.allow_wgi->load         (config.compatibility.sdl.allow_wgi);
   compatibility.sdl.allow_raw_input->load   (config.compatibility.sdl.allow_raw_input); 
   compatibility.sdl.allow_direct_input->load(config.compatibility.sdl.allow_direct_input);
@@ -6025,7 +6049,7 @@ auto DeclKeybind =
         {
           if (config.display.monitor_idx > 0)
           {
-            if (StrStrIW (mi.szDevice, SK_FormatStringW (LR"(\DISPLAY%i)", config.display.monitor_idx).c_str ()) != nullptr)
+            if (_wcsicmp (mi.szDevice, SK_FormatStringW (LR"(\\.\DISPLAY%i)", config.display.monitor_idx).c_str ()) == 0)
             {
               config.display.monitor_handle = hMonitor;
               rb.next_monitor               = hMonitor;
@@ -7097,6 +7121,7 @@ SK_SaveConfig ( std::wstring name,
   compatibility.allow_dxdiagn->store          (config.compatibility.allow_dxdiagn);
   compatibility.sdl_sanity_level->store       (config.compatibility.sdl_sanity_level);
   compatibility.debug_level->store            (config.compatibility.disable_debug_features ? 0 : 1);
+  compatibility.environment_variables->store  (config.compatibility.environment_variables);
 
   compatibility.sdl.allow_xinput->store       (config.compatibility.sdl.allow_xinput);
   compatibility.sdl.allow_direct_input->store (config.compatibility.sdl.allow_direct_input);
@@ -8049,7 +8074,7 @@ SK_SaveConfig ( std::wstring name,
       LSTATUS lsRegSet = RegSetValueExW (
              hKey, SK_GetModuleFullName (SK_GetDLL ()).c_str (),
                 0, REG_SZ, (LPBYTE)        SK_GetVersionStrW (),
-                            (DWORD)wcslen (SK_GetVersionStrW ()) * sizeof (wchar_t) );
+                            (DWORD)wcslen (SK_GetVersionStrW () + 1) * sizeof (wchar_t) );
 
       if (lsRegSet != ERROR_SUCCESS)
       {
@@ -8384,7 +8409,7 @@ SK_Keybind::parse (void)
   }
 
   wchar_t   wszKeyBind [128] = { };
-  lstrcatW (wszKeyBind, human_readable.c_str ());
+  StrNCatW (wszKeyBind, human_readable.c_str (), 127);
 
   wchar_t* wszBuf = nullptr;
   wchar_t* wszTok = std::wcstok (wszKeyBind, L"+", &wszBuf);
@@ -8760,7 +8785,7 @@ SK_AppCache_GetSharedProfileName (const wchar_t* wszPath, bool log_status = fals
           data.resize (size);
       }
 
-      CloseHandle (hFile);
+      SK_CloseHandle (hFile);
 
       nlohmann::json json =
         nlohmann::json::parse (data, nullptr, false);
@@ -9278,6 +9303,16 @@ SK_AppCache_Manager::getConfigPathForEpicApp (const char* szEpicApp) const
 
       SK_RecursiveMove ( original_dir.c_str (),
                                  path.c_str (), false );
+
+      // The profile moved; if the INI keeps its old name, SK_SaveConfig's path
+      //   will never match it and iSK_INI::write (...) bypasses its CRC test.
+      if ((! old_ini.empty ()) && dll_ini != nullptr)
+      {
+        dll_ini->rename (
+          SK_FormatStringW ( L"%ws%ws", path.c_str (),
+            std::filesystem::path (old_ini).filename ().c_str () ).c_str ()
+        );
+      }
     }
   }
 
@@ -9343,6 +9378,16 @@ SK_AppCache_Manager::getConfigPathForGenericApp (const wchar_t* wszGenericAppNam
 
       SK_RecursiveMove ( original_dir.c_str (),
                                  path.c_str (), false );
+
+      // The profile moved; if the INI keeps its old name, SK_SaveConfig's path
+      //   will never match it and iSK_INI::write (...) bypasses its CRC test.
+      if ((! old_ini.empty ()) && dll_ini != nullptr)
+      {
+        dll_ini->rename (
+          SK_FormatStringW ( L"%ws%ws", path.c_str (),
+            std::filesystem::path (old_ini).filename ().c_str () ).c_str ()
+        );
+      }
     }
   }
 
@@ -9408,6 +9453,16 @@ SK_AppCache_Manager::getConfigPathForAppID (AppId64_t uiAppID) const
 
       SK_RecursiveMove ( original_dir.c_str (),
                                  path.c_str (), false );
+
+      // The profile moved; if the INI keeps its old name, SK_SaveConfig's path
+      //   will never match it and iSK_INI::write (...) bypasses its CRC test.
+      if ((! old_ini.empty ()) && dll_ini != nullptr)
+      {
+        dll_ini->rename (
+          SK_FormatStringW ( L"%ws%ws", path.c_str (),
+            std::filesystem::path (old_ini).filename ().c_str () ).c_str ()
+        );
+      }
     }
   }
 
@@ -9807,6 +9862,14 @@ sk_config_t::utility_functions_s::save_async_if (bool predicate)
 void
 sk_config_t::utility_functions_s::save_async (void)
 {
+  SK_RunOnce (
+    if (! SK_GetHostAppUtil ()->isBlacklisted ())
+    {
+      config.utility.hSignalAsyncSave =
+        SK_CreateEvent (nullptr, FALSE, FALSE, nullptr);
+    }
+  );
+
   // Don't write anything for launchers
   if (SK_GetCurrentGameID () == SK_GAME_ID::Launcher || SK_GetHostAppUtil ()->isBlacklisted ())
     return;

@@ -229,8 +229,8 @@ CrashHandler::Reinstall (void)
   if (ReadAcquire (&__SK_DLL_Ending))
     return;
 
-  static volatile LPVOID   pOldHook   = nullptr;
-  if ((uintptr_t)InterlockedCompareExchangePointer (&pOldHook, (PVOID)1, nullptr) > (uintptr_t)1)
+  static volatile LPVOID              pOldHook  = nullptr;
+  if ((uintptr_t)ReadPointerAcquire (&pOldHook) > 1)
   {
     if (MH_OK == SK_RemoveHook (ReadPointerAcquire (&pOldHook)))
     {
@@ -394,12 +394,11 @@ SK_GetSymbolNameFromModuleAddr (HMODULE hMod, uintptr_t addr)
   auto BaseAddr   = (DWORD)  mod_info.lpBaseOfDll;
 #endif
 
-  char szModName [MAX_PATH + 2] = { };
+  char                      szModName [MAX_PATH + 2] = { };
+  GetModuleFileNameA (hMod, szModName, MAX_PATH);
 
-  GetModuleFileNameA   ( hMod, szModName, MAX_PATH );
-
-  char* szDupName    = _strdup (szModName);
-  char* pszShortName = szDupName;
+  std::string szDupName (szModName);
+  char*    pszShortName = szDupName.data ();
 
   PathStripPathA (pszShortName);
 
@@ -411,12 +410,17 @@ SK_GetSymbolNameFromModuleAddr (HMODULE hMod, uintptr_t addr)
     if ( dbghelp_callers.find (hMod) ==
          dbghelp_callers.cend (    )  )
     {
-      SK_SymLoadModule ( hProc,
-                           nullptr,
-                             pszShortName,
-                               nullptr,
-                                 BaseAddr,
-                                   mod_info.SizeOfImage );
+      if (! SK_SymLoadModule ( hProc,
+                                 nullptr,
+                                   szModName,
+                                     nullptr,
+                                       BaseAddr,
+                                         mod_info.SizeOfImage )
+         )
+      {
+        //if (GetLastError () != ERROR_SUCCESS)
+          //return 0;
+      }
 
       dbghelp_callers.insert (hMod);
     }
@@ -442,8 +446,6 @@ SK_GetSymbolNameFromModuleAddr (HMODULE hMod, uintptr_t addr)
   {
     ret = "UNKNOWN";
   }
-
-  free (szDupName);
 
   return ret;
 }
@@ -537,6 +539,479 @@ GetBasicType (DWORD typeIndex, DWORD64 modBase)
   }
 
   return btNoType;
+}
+
+//
+// DbgHelp entry points used by the crash stack walk that Special K does not wrap;
+//   these all come from the isolated DbgHelp DLL and the caller must hold
+//     cs_dbghelp and cs_dbghelp2 while using them.
+//
+static struct {
+  decltype (&::StackWalkEx)                 StackWalkEx                 = nullptr;
+  decltype (&::SymFromInlineContext)        SymFromInlineContext        = nullptr;
+  decltype (&::SymGetLineFromInlineContext) SymGetLineFromInlineContext = nullptr;
+  decltype (&::SymFunctionTableAccess64)    SymFunctionTableAccess64    = nullptr;
+  decltype (&::SymGetModuleBase64)          SymGetModuleBase64          = nullptr;
+  decltype (&::SymLoadModuleExW)            SymLoadModuleExW            = nullptr;
+  decltype (&::UnDecorateSymbolName)        UnDecorateSymbolName        = nullptr;
+} SK_Crash_DbgHelp;
+
+static void
+SK_Crash_ResolveDbgHelp (void)
+{
+  static const bool
+    resolved = []
+    {
+      const HMODULE hModDbgHelp =
+        SK_Debug_LoadHelper ();
+
+      SK_Crash_DbgHelp.StackWalkEx                 = (decltype (&::StackWalkEx))                SK_GetProcAddress (hModDbgHelp, "StackWalkEx");
+      SK_Crash_DbgHelp.SymFromInlineContext        = (decltype (&::SymFromInlineContext))       SK_GetProcAddress (hModDbgHelp, "SymFromInlineContext");
+      SK_Crash_DbgHelp.SymGetLineFromInlineContext = (decltype (&::SymGetLineFromInlineContext))SK_GetProcAddress (hModDbgHelp, "SymGetLineFromInlineContext");
+      SK_Crash_DbgHelp.SymFunctionTableAccess64    = (decltype (&::SymFunctionTableAccess64))   SK_GetProcAddress (hModDbgHelp, "SymFunctionTableAccess64");
+      SK_Crash_DbgHelp.SymGetModuleBase64          = (decltype (&::SymGetModuleBase64))         SK_GetProcAddress (hModDbgHelp, "SymGetModuleBase64");
+      SK_Crash_DbgHelp.SymLoadModuleExW            = (decltype (&::SymLoadModuleExW))           SK_GetProcAddress (hModDbgHelp, "SymLoadModuleExW");
+      SK_Crash_DbgHelp.UnDecorateSymbolName        = (decltype (&::UnDecorateSymbolName))       SK_GetProcAddress (hModDbgHelp, "UnDecorateSymbolName");
+
+      return true;
+    } ();
+
+  std::ignore = resolved;
+}
+
+// Returns the base of the module containing addr, loading the module into DbgHelp
+//   (by its full path) if DbgHelp does not already know about it.
+//
+//  * The dbghelp_callers cache cannot be trusted here; modules are added to it even
+//      when SymLoadModule fails, and they are never retried after that.
+static DWORD64
+SK_Crash_EnsureSymModule (HANDLE hProc, DWORD64 addr)
+{
+  if (SK_Crash_DbgHelp.SymGetModuleBase64 == nullptr)
+    return 0;
+
+  if (const DWORD64 base = SK_Crash_DbgHelp.SymGetModuleBase64 (hProc, addr))
+    return base;
+
+  HMODULE hMod = nullptr;
+
+  if (! GetModuleHandleExW ( GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast <LPCWSTR> (static_cast <uintptr_t> (addr)),
+                                 &hMod ) )
+    return 0;
+
+  MODULEINFO mod_info = { };
+
+  if (! GetModuleInformation (hProc, hMod, &mod_info, sizeof (mod_info)))
+    return 0;
+
+  wchar_t                    wszModPath [MAX_PATH + 2] = { };
+  GetModuleFileNameW (hMod,  wszModPath, MAX_PATH);
+
+  if (SK_Crash_DbgHelp.SymLoadModuleExW != nullptr)
+  {
+    SK_Crash_DbgHelp.SymLoadModuleExW ( hProc, nullptr, wszModPath, nullptr,
+                                          reinterpret_cast <DWORD64> (mod_info.lpBaseOfDll),
+                                                                      mod_info.SizeOfImage,
+                                            nullptr, 0 );
+  }
+
+  return
+    SK_Crash_DbgHelp.SymGetModuleBase64 (hProc, addr);
+}
+
+static PVOID
+CALLBACK
+SK_Crash_FunctionTableAccess (HANDLE hProc, DWORD64 addr)
+{
+#ifdef _M_AMD64
+  // The OS's own lookup also finds function tables registered at runtime
+  //   (RtlAddFunctionTable / RtlInstallFunctionTableCallback) by JIT compilers,
+  //     which DbgHelp knows nothing about.
+  DWORD64 image_base = 0;
+
+  if (PRUNTIME_FUNCTION pFunc = RtlLookupFunctionEntry (addr, &image_base, nullptr))
+    return pFunc;
+#endif
+
+  SK_Crash_EnsureSymModule (hProc, addr);
+
+  return SK_Crash_DbgHelp.SymFunctionTableAccess64 != nullptr ?
+         SK_Crash_DbgHelp.SymFunctionTableAccess64 (hProc, addr) : nullptr;
+}
+
+static DWORD64
+CALLBACK
+SK_Crash_GetModuleBase (HANDLE hProc, DWORD64 addr)
+{
+  if (const DWORD64 base = SK_Crash_EnsureSymModule (hProc, addr))
+    return base;
+
+#ifdef _M_AMD64
+  // Code outside of any module (JIT); the unwind data returned by
+  //   SK_Crash_FunctionTableAccess is relative to the function table's base.
+  DWORD64 image_base = 0;
+
+  if (RtlLookupFunctionEntry (addr, &image_base, nullptr))
+    return image_base;
+#endif
+
+  return 0;
+}
+
+static BOOL
+SK_Crash_SafeStackWalk (HANDLE hProc, HANDLE hThread, STACKFRAME_EX* pFrame, CONTEXT* pCtx)
+{
+  const DWORD MachineType =
+    SK_RunLHIfBitness ( 32, IMAGE_FILE_MACHINE_I386,
+                            IMAGE_FILE_MACHINE_AMD64 );
+
+  __try
+  {
+    // StackWalkEx also produces frames for inlined functions
+    if (SK_Crash_DbgHelp.StackWalkEx != nullptr)
+    {
+      return
+        SK_Crash_DbgHelp.StackWalkEx ( MachineType, hProc, hThread, pFrame, pCtx, nullptr,
+                                         SK_Crash_FunctionTableAccess,
+                                         SK_Crash_GetModuleBase, nullptr, SYM_STKWALK_DEFAULT );
+    }
+
+    // STACKFRAME_EX begins with the layout of STACKFRAME64
+    return
+      StackWalk64 ( MachineType, hProc, hThread,
+                      reinterpret_cast <LPSTACKFRAME64> (pFrame), pCtx, nullptr,
+                        SK_Crash_FunctionTableAccess,
+                        SK_Crash_GetModuleBase, nullptr );
+  }
+
+  __except ( GetExceptionCode () == EXCEPTION_ACCESS_VIOLATION ?
+                                    EXCEPTION_EXECUTE_HANDLER  : EXCEPTION_CONTINUE_SEARCH )
+  {
+    return FALSE;
+  }
+}
+
+static BOOL
+SK_Crash_SafeSymbolizeFrame ( HANDLE           hProc,
+                              DWORD64          addr,
+                              ULONG            inline_ctx,
+                              bool             inline_frame,
+                              PSYMBOL_INFO     pSymbol,
+                              PIMAGEHLP_LINE64 pLine,
+                              BOOL*            pbFileAndLine )
+{
+  DWORD64 Displacement = 0;
+  DWORD   Disp         = 0;
+  BOOL    bSymbol      = FALSE;
+
+  *pbFileAndLine = FALSE;
+
+  __try
+  {
+    if (inline_frame && SK_Crash_DbgHelp.SymFromInlineContext        != nullptr
+                     && SK_Crash_DbgHelp.SymGetLineFromInlineContext != nullptr)
+    {
+      bSymbol =
+        SK_Crash_DbgHelp.SymFromInlineContext (hProc, addr, inline_ctx, &Displacement, pSymbol);
+
+      if (bSymbol)
+        *pbFileAndLine =
+          SK_Crash_DbgHelp.SymGetLineFromInlineContext (hProc, addr, inline_ctx, 0, &Disp, pLine);
+    }
+
+    else
+    {
+      bSymbol =
+        SymFromAddr (hProc, addr, &Displacement, pSymbol);
+
+      if (bSymbol)
+        *pbFileAndLine =
+          SymGetLineFromAddr64 (hProc, addr, &Disp, pLine);
+    }
+  }
+
+  __except ( GetExceptionCode () == EXCEPTION_ACCESS_VIOLATION ?
+                                    EXCEPTION_EXECUTE_HANDLER  : EXCEPTION_CONTINUE_SEARCH )
+  {
+    bSymbol        = FALSE;
+    *pbFileAndLine = FALSE;
+  }
+
+  return bSymbol;
+}
+
+//
+// MSVC C++ exception (0xE06D7363) throw information; see
+//   https://devblogs.microsoft.com/oldnewthing/20100730-00/?p=13273
+//
+//  * On x64, the int fields are RVAs relative to ExceptionInformation [3];
+//      on x86 they are absolute addresses (and the image base is 0).
+//
+#pragma pack (push, 4)
+struct SK_MSVC_TypeDescriptor     { const void* pVFTable; void* spare; char name [1]; };
+struct SK_MSVC_PMD                { int mdisp; int pdisp; int vdisp;                  };
+struct SK_MSVC_CatchableType      { unsigned int properties;    int         pType;
+                                    SK_MSVC_PMD  thisDisplacement;
+                                    int          sizeOrOffset;  int         copyFunction; };
+struct SK_MSVC_CatchableTypeArray { int nCatchableTypes; int arrayOfCatchableTypes [1]; };
+struct SK_MSVC_ThrowInfo          { unsigned int attributes;    int         pmfnUnwind;
+                                    int          pForwardCompat;
+                                    int          pCatchableTypeArray;                 };
+#pragma pack (pop)
+
+// Undocumented UnDecorateSymbolName (...) flags, these are what type_info::name (...) uses
+#define SK_UNDNAME_TYPE_ONLY 0x2000
+#define SK_UNDNAME_NO_ECSU   0x8000 // No "class", "struct", "union" or "enum"
+
+// Caller must hold cs_dbghelp and cs_dbghelp2
+static bool
+SK_SEH_DecodeCxxException ( const EXCEPTION_RECORD* pRecord,
+                                  char*             szType, size_t type_len,
+                                  char*             szWhat, size_t what_len,
+                                  bool*             pbByPointer )
+{
+  *szType      = '\0';
+  *szWhat      = '\0';
+  *pbByPointer = false;
+
+  if (pRecord->ExceptionCode != EXCEPTION_MSVC_CPP || pRecord->NumberParameters < 3)
+    return false;
+
+  const ULONG_PTR magic = pRecord->ExceptionInformation [0];
+
+  if (magic != 0x19930520 && magic != 0x19930521 && magic != 0x19930522)
+    return false;
+
+  const ULONG_PTR base =
+    pRecord->NumberParameters >= 4 ? pRecord->ExceptionInformation [3] : 0;
+
+  const auto pObject    =
+    reinterpret_cast <      uint8_t           *> (pRecord->ExceptionInformation [1]);
+  const auto pThrowInfo =
+    reinterpret_cast <const SK_MSVC_ThrowInfo *> (pRecord->ExceptionInformation [2]);
+
+  if (pThrowInfo == nullptr)
+    return false;
+
+  __try
+  {
+    const auto pTypeArray =
+      reinterpret_cast <const SK_MSVC_CatchableTypeArray *> (base + pThrowInfo->pCatchableTypeArray);
+
+    for ( int i = 0 ; i < pTypeArray->nCatchableTypes ; ++i )
+    {
+      const auto pCatchable =
+        reinterpret_cast <const SK_MSVC_CatchableType *>  (base + pTypeArray->arrayOfCatchableTypes [i]);
+      const auto pType      =
+        reinterpret_cast <const SK_MSVC_TypeDescriptor *> (base + pCatchable->pType);
+
+      // The first catchable type is the type of the thrown object, the rest are its bases
+      if (i == 0 && SK_Crash_DbgHelp.UnDecorateSymbolName != nullptr)
+      {
+        // Skip the leading '.' to get the decorated type name (i.e. ".PEAVCResourceException@@")
+        if ( SK_Crash_DbgHelp.UnDecorateSymbolName ( &pType->name [1], szType, static_cast <DWORD> (type_len),
+                                                       UNDNAME_32_BIT_DECODE | SK_UNDNAME_TYPE_ONLY |
+                                                                               SK_UNDNAME_NO_ECSU ) == 0 )
+        {
+          strncpy_s (szType, type_len, pType->name, _TRUNCATE);
+        }
+
+        // UNDNAME_NO_PTR64 is ignored by DbgHelp
+        if (char* pszPtr64 = strstr (szType, " __ptr64"))
+          memmove (pszPtr64, pszPtr64 + 8, strlen (pszPtr64 + 8) + 1);
+
+        const size_t len = strlen (szType);
+
+        if (len > 2 && strcmp (&szType [len - 2], " *") == 0)
+        {
+          szType [len - 2] = '\0';
+          *pbByPointer     = true;
+        }
+      }
+
+      // Call what () if this can be caught as std::exception (or std::exception *)
+      const bool by_value   = strcmp (pType->name, ".?AVexception@std@@")  == 0;
+      const bool by_pointer = strcmp (pType->name, SK_RunLHIfBitness (64, ".PEAVexception@std@@",
+                                                                          ".PAVexception@std@@")) == 0;
+
+      if ((by_value || by_pointer) && pObject != nullptr && *szWhat == '\0')
+      {
+        uint8_t* pThis =
+          by_pointer ? *reinterpret_cast <uint8_t **> (pObject)
+                     :                                 pObject;
+
+        if (pThis != nullptr)
+        {
+          const SK_MSVC_PMD& pmd =
+            pCatchable->thisDisplacement;
+
+          if (pmd.pdisp >= 0) // Virtual base
+          {
+            const int* vbtable = *reinterpret_cast <int **> (pThis + pmd.pdisp);
+            pThis             += pmd.pdisp + vbtable [pmd.vdisp / sizeof (int)];
+          }
+
+          pThis += pmd.mdisp;
+
+          if (const char* szExceptionWhat = reinterpret_cast <std::exception *> (pThis)->what ())
+            strncpy_s (szWhat, what_len, szExceptionWhat, _TRUNCATE);
+        }
+      }
+    }
+  }
+
+  __except ( GetExceptionCode () == EXCEPTION_ACCESS_VIOLATION ?
+                                    EXCEPTION_EXECUTE_HANDLER  : EXCEPTION_CONTINUE_SEARCH )
+  {
+  }
+
+  return *szType != '\0';
+}
+
+std::string
+SK_DbgHlp_StackFrame::describe (void) const
+{
+  if (has_symbol)
+    return
+      SK_FormatString ("%s%s", inline_frame ? "[Inline] " : "", symbol_name);
+
+  if (hModule != nullptr)
+    return
+      SK_FormatString ( "+0x%llx", static_cast <unsigned long long> (
+                          address - reinterpret_cast <uintptr_t> (hModule) ) );
+
+  return
+    SK_FormatString ("0x%llx", static_cast <unsigned long long> (address));
+}
+
+size_t
+SK_DbgHlp_WalkStack ( HANDLE                               hThread,
+                      const CONTEXT&                       context,
+                      std::vector <SK_DbgHlp_StackFrame>&  frames,
+                      size_t                               max_frames )
+{
+  frames.clear ();
+
+  if (! ( config.system.handle_crashes && cs_dbghelp  != nullptr
+                                       && cs_dbghelp2 != nullptr && ReadAcquire (&__SK_DLL_Refs) > 0 ))
+  {
+    return 0;
+  }
+
+  SK_Crash_ResolveDbgHelp ();
+  SK_SymSetOpts           ();
+
+  HANDLE  hProc = SK_GetCurrentProcess ();
+  CONTEXT ctx (context);
+
+  STACKFRAME_EX stackframe = { };
+                stackframe.StackFrameSize   = sizeof (STACKFRAME_EX);
+#ifdef _M_AMD64
+                stackframe.AddrPC.Offset    = ctx.Rip;
+                stackframe.AddrStack.Offset = ctx.Rsp;
+                stackframe.AddrFrame.Offset = ctx.Rbp;
+#else /* _M_IX86 */
+                stackframe.AddrPC.Offset    = ctx.Eip;
+                stackframe.AddrStack.Offset = ctx.Esp;
+                stackframe.AddrFrame.Offset = ctx.Ebp;
+#endif
+
+  stackframe.AddrPC.Mode    = AddrModeFlat;
+  stackframe.AddrStack.Mode = AddrModeFlat;
+  stackframe.AddrFrame.Mode = AddrModeFlat;
+
+  std::scoped_lock auto_lock { *cs_dbghelp, *cs_dbghelp2 };
+
+  // Return addresses point to the instruction after the call, which may belong to
+  //   a different line (or function); look those frames up using the call itself.
+  bool caller_frame = false;
+
+  // The size limit guards against endless walks through a corrupted stack
+  while ( frames.size () < max_frames &&
+            SK_Crash_SafeStackWalk (hProc, hThread, &stackframe, &ctx) )
+  {
+    const DWORD64 addr =
+      stackframe.AddrPC.Offset;
+
+    if (addr == 0)
+      break;
+
+    // INLINE_FRAME_CONTEXT (DbgEng.h): { BYTE FrameId; BYTE FrameType; WORD FrameSignature; }
+    static constexpr BYTE _STACK_FRAME_TYPE_INLINE = 0x02;
+
+    const ULONG inline_ctx =
+      stackframe.InlineFrameContext;
+
+    auto& frame =
+      frames.emplace_back ();
+
+    frame.address      = addr;
+    frame.inline_frame =
+      ( inline_ctx != INLINE_FRAME_CONTEXT_IGNORE &&
+        (static_cast <BYTE> (inline_ctx >> 8) & _STACK_FRAME_TYPE_INLINE) );
+
+    if ( GetModuleHandleExA ( GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                              GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+              reinterpret_cast <LPCSTR> (static_cast <uintptr_t> (addr)),
+                                  &frame.hModule ) )
+    {
+      char                              szModName [MAX_PATH + 2] = { };
+      GetModuleFileNameA (frame.hModule, szModName, MAX_PATH);
+
+      strncpy_s ( frame.module_name, MAX_PATH,
+                    PathFindFileNameA (szModName), _TRUNCATE );
+    }
+
+    // Make sure DbgHelp has this frame's module loaded before symbolizing it
+    SK_Crash_EnsureSymModule (hProc, addr);
+
+    const DWORD64 lookup_addr =
+      caller_frame ? addr - 1 : addr;
+
+    SYMBOL_INFO_PACKAGE sip = { };
+
+    sip.si.SizeOfStruct = sizeof SYMBOL_INFO;
+    sip.si.MaxNameLen   = sizeof sip.name;
+
+    IMAGEHLP_LINE64 ihl              = {                    };
+                    ihl.SizeOfStruct = sizeof IMAGEHLP_LINE64;
+
+    BOOL bFileAndLine = FALSE;
+    BOOL bSymbol      =
+      SK_Crash_SafeSymbolizeFrame ( hProc, lookup_addr, inline_ctx,
+                                      frame.inline_frame, &sip.si, &ihl, &bFileAndLine );
+
+    if ((! bSymbol) && lookup_addr != addr)
+    {
+      bSymbol =
+        SK_Crash_SafeSymbolizeFrame ( hProc, addr, inline_ctx,
+                                        frame.inline_frame, &sip.si, &ihl, &bFileAndLine );
+    }
+
+    if (bSymbol)
+    {
+      frame.has_symbol = true;
+
+      strncpy_s ( frame.symbol_name, sizeof (frame.symbol_name),
+                    sip.si.Name, _TRUNCATE );
+
+      if (bFileAndLine && ihl.FileName != nullptr)
+      {
+        strncpy_s ( frame.file_name, MAX_PATH,
+                      ihl.FileName, _TRUNCATE );
+
+        frame.line_number = ihl.LineNumber;
+      }
+    }
+
+    if (! frame.inline_frame)
+      caller_frame = true;
+  }
+
+  return
+    frames.size ();
 }
 
 std::wstring
@@ -723,11 +1198,37 @@ SK_SEH_SummarizeException (_In_ struct _EXCEPTION_POINTERS* ExceptionInfo, bool 
         break;
     }
 
-    log_entry.append (L"-----------------------------------------------------------\n");
+    log_entry.append (L"--------------------------------------------------------------------------------------------------\n");
     if (*desc != L'\0') log_entry_format (L"[! Except !] %s\n", desc));
     else                log_entry_format (L"[! Except !] Non-SEH Exception:\t%08x\n",
                                 ExceptionInfo->ExceptionRecord->ExceptionCode));
-    log_entry.append (L"-----------------------------------------------------------\n");
+
+    if ( ExceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_MSVC_CPP &&
+         cs_dbghelp != nullptr && cs_dbghelp2 != nullptr )
+    {
+      char szType [512] = { };
+      char szWhat [512] = { };
+      bool bByPointer   = false;
+
+      SK_Crash_ResolveDbgHelp ();
+
+      std::scoped_lock auto_lock { *cs_dbghelp, *cs_dbghelp2 };
+
+      if ( SK_SEH_DecodeCxxException ( ExceptionInfo->ExceptionRecord,
+                                         szType, sizeof (szType),
+                                         szWhat, sizeof (szWhat), &bByPointer ) )
+      {
+        log_entry.append (L"--------------------------------------------------------------------------------------------------\n");
+
+        log_entry_format (L"[ CxxThrow ]  ~ Type.....: %hs%ws\n", szType,
+                                             bByPointer ? L" (thrown by pointer)" : L""));
+
+        if (*szWhat != '\0')
+          log_entry_format (L"[ CxxThrow ]  # what ()..: \"%hs\"\n", szWhat));
+      }
+    }
+
+    log_entry.append (L"--------------------------------------------------------------------------------------------------\n");
 
     if (hModSource)
       SK_FreeLibrary (hModSource);
@@ -754,7 +1255,7 @@ SK_SEH_SummarizeException (_In_ struct _EXCEPTION_POINTERS* ExceptionInfo, bool 
   log_entry_format ( L"[StackFrame] <-> Eip=%08xh, Esp=%08xh, Ebp=%08xh\n",
                        ip,
                          ExceptionInfo->ContextRecord->Esp,
-                           ExceptionInfo->ContextRecord->Ebp ));
+                         ExceptionInfo->ContextRecord->Ebp ));
   log_entry_format ( L"[StackFrame] >-< Esi=%08xh, Edi=%08xh\n",
                        ExceptionInfo->ContextRecord->Esi,
                          ExceptionInfo->ContextRecord->Edi ));
@@ -771,30 +1272,30 @@ SK_SEH_SummarizeException (_In_ struct _EXCEPTION_POINTERS* ExceptionInfo, bool 
   log_entry_format ( L"[ FaultMod ]  * RIP Addr.: %hs+%ph\n",
                        pszShortName, (LPVOID)((uintptr_t)ip-(uintptr_t)BaseAddr)));
 
-  log_entry_format ( L"[StackFrame] <-> Rip=%012llxh, Rsp=%012llxh, Rbp=%012llxh\n",
+  log_entry_format ( L"[StackFrame] <-> Rip=%016llxh, Rsp=%016llxh, Rbp=%016llxh\n",
                      ip,
                        ExceptionInfo->ContextRecord->Rsp,
-                         ExceptionInfo->ContextRecord->Rbp ));
-  log_entry_format ( L"[StackFrame] >-< Rsi=%012llxh, Rdi=%012llxh\n",
+                       ExceptionInfo->ContextRecord->Rbp ));
+  log_entry_format ( L"[StackFrame] >-< Rsi=%016llxh, Rdi=%016llxh\n",
                      ExceptionInfo->ContextRecord->Rsi,
-                       ExceptionInfo->ContextRecord->Rdi ));
+                     ExceptionInfo->ContextRecord->Rdi ));
 
-  log_entry_format ( L"[  GP Reg  ]   rax:    0x%012llx    rbx:    0x%012llx\n",
+  log_entry_format ( L"[  GP Reg  ]   rax:    0x%016llx    rbx:    0x%016llx\n",
                      ExceptionInfo->ContextRecord->Rax,
                      ExceptionInfo->ContextRecord->Rbx ));
-  log_entry_format ( L"[  GP Reg  ]   rcx:    0x%012llx    rdx:    0x%012llx\n",
+  log_entry_format ( L"[  GP Reg  ]   rcx:    0x%016llx    rdx:    0x%016llx\n",
                      ExceptionInfo->ContextRecord->Rcx,
                      ExceptionInfo->ContextRecord->Rdx ));
-  log_entry_format ( L"[  GP Reg  ]   r8:     0x%012llx    r9:     0x%012llx\n",
+  log_entry_format ( L"[  GP Reg  ]   r8:     0x%016llx    r9:     0x%016llx\n",
                      ExceptionInfo->ContextRecord->R8,
                      ExceptionInfo->ContextRecord->R9 ));
-  log_entry_format ( L"[  GP Reg  ]   r10:    0x%012llx    r11:    0x%012llx\n",
+  log_entry_format ( L"[  GP Reg  ]   r10:    0x%016llx    r11:    0x%016llx\n",
                      ExceptionInfo->ContextRecord->R10,
                      ExceptionInfo->ContextRecord->R11 ));
-  log_entry_format ( L"[  GP Reg  ]   r12:    0x%012llx    r13:    0x%012llx\n",
+  log_entry_format ( L"[  GP Reg  ]   r12:    0x%016llx    r13:    0x%016llx\n",
                      ExceptionInfo->ContextRecord->R12,
                      ExceptionInfo->ContextRecord->R13 ));
-  log_entry_format ( L"[  GP Reg  ]   r14:    0x%012llx    r15:    0x%012llx\n",
+  log_entry_format ( L"[  GP Reg  ]   r14:    0x%016llx    r15:    0x%016llx\n",
                      ExceptionInfo->ContextRecord->R14,
                      ExceptionInfo->ContextRecord->R15 ));
   log_entry_format ( L"[ GP Flags ]   EFlags: 0x%08x\n",
@@ -803,7 +1304,7 @@ SK_SEH_SummarizeException (_In_ struct _EXCEPTION_POINTERS* ExceptionInfo, bool 
   if ( ExceptionInfo->ContextRecord->Dr0 != 0x0 ||
        ExceptionInfo->ContextRecord->Dr1 != 0x0 )
   {
-    log_entry_format ( L"[ DebugReg ]   dr0:    0x%012llx    dr1:    0x%012llx\n",
+    log_entry_format ( L"[ DebugReg ]   dr0:    0x%016llx    dr1:    0x%016llx\n",
                     ExceptionInfo->ContextRecord->Dr0,
                     ExceptionInfo->ContextRecord->Dr1 ));
   }
@@ -811,7 +1312,7 @@ SK_SEH_SummarizeException (_In_ struct _EXCEPTION_POINTERS* ExceptionInfo, bool 
   if ( ExceptionInfo->ContextRecord->Dr2 != 0x0 ||
        ExceptionInfo->ContextRecord->Dr3 != 0x0 )
   {
-    log_entry_format ( L"[ DebugReg ]   dr2:    0x%012llx    dr3:    0x%012llx\n",
+    log_entry_format ( L"[ DebugReg ]   dr2:    0x%016llx    dr3:    0x%016llx\n",
                     ExceptionInfo->ContextRecord->Dr2,
                     ExceptionInfo->ContextRecord->Dr3 ));
   }
@@ -819,37 +1320,14 @@ SK_SEH_SummarizeException (_In_ struct _EXCEPTION_POINTERS* ExceptionInfo, bool 
   if ( ExceptionInfo->ContextRecord->Dr6 != 0x0 ||
        ExceptionInfo->ContextRecord->Dr7 != 0x0 )
   {
-    log_entry_format ( L"[ DebugReg ]   dr6:    0x%012llx    dr7:    0x%012llx\n",
+    log_entry_format ( L"[ DebugReg ]   dr6:    0x%016llx    dr7:    0x%016llx\n",
                     ExceptionInfo->ContextRecord->Dr6,
                     ExceptionInfo->ContextRecord->Dr7 ));
   }
 #endif
 
   log_entry.append (
-    L"-----------------------------------------------------------\n");
-
-  CONTEXT ctx (*ExceptionInfo->ContextRecord);
-
-
-#ifdef _M_AMD64
-  STACKFRAME64 stackframe = { };
-               stackframe.AddrStack.Offset = ctx.Rsp;
-               stackframe.AddrFrame.Offset = ctx.Rbp;
-#else /* _M_IX86 */
-  STACKFRAME   stackframe = { };
-               stackframe.AddrStack.Offset = ctx.Esp;
-               stackframe.AddrFrame.Offset = ctx.Ebp;
-#endif
-
-  stackframe.AddrPC.Mode   = AddrModeFlat;
-  stackframe.AddrPC.Offset = ip;
-
-  stackframe.AddrStack.Mode = AddrModeFlat;
-  stackframe.AddrFrame.Mode = AddrModeFlat;
-
-
-  BOOL ret = TRUE;
-
+    L"--------------------------------------------------------------------------------------------------\n");
 
   size_t max_symbol_len = 0,
          max_module_len = 0,
@@ -895,149 +1373,53 @@ SK_SEH_SummarizeException (_In_ struct _EXCEPTION_POINTERS* ExceptionInfo, bool 
   };
 
   std::vector <stack_entry_s> stack_entries;
-  stack_entries.reserve (16);
+  stack_entries.reserve (64);
 
-  do
+  std::vector <SK_DbgHlp_StackFrame> frames;
+
+  SK_DbgHlp_WalkStack ( SK_GetCurrentThread (),
+                          *ExceptionInfo->ContextRecord, frames );
+
+  for ( const auto& frame : frames )
   {
-    ip = stackframe.AddrPC.Offset;
+    const std::string symbol_name =
+      frame.describe ();
 
-    if ( GetModuleHandleEx ( GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-              reinterpret_cast <LPCWSTR> (ip),
-                                 &hModSource ) )
-    {
-      GetModuleFileNameA (hModSource, szModName, MAX_PATH);
-    }
+    const char* szModule =
+      frame.hModule != nullptr ? frame.module_name
+                               : "Unknown Module";
 
-    MODULEINFO mod_info = { };
-
-    if (! GetModuleInformation (
-            GetCurrentProcess (), hModSource, &mod_info, sizeof (mod_info)
-       )                       )
+    if (frame.line_number != 0)
     {
       stack_entries.emplace_back (
-        "Unknown Module", "Unknown Function"
+        szModule, symbol_name.c_str (),
+          frame.file_name, static_cast <int> (frame.line_number)
       );
     }
 
     else
     {
-#ifdef _M_AMD64
-      BaseAddr = (DWORD64)mod_info.lpBaseOfDll;
-#else /* _M_IX86 */
-      BaseAddr = (DWORD)  mod_info.lpBaseOfDll;
-#endif
-
-      strncpy_s     (szDupName, MAX_PATH, szModName, _TRUNCATE);
-      pszShortName = szDupName;
-
-      PathStripPathA (pszShortName);
-
-      if ( dbghelp_callers.find (hModSource) ==
-           dbghelp_callers.cend (          ) && cs_dbghelp != nullptr && cs_dbghelp2 != nullptr )
-      {
-        std::scoped_lock auto_lock { *cs_dbghelp, *cs_dbghelp2 };
-
-        if ( dbghelp_callers.find (hModSource) ==
-             dbghelp_callers.cend (          )  )
-        {
-          SK_SymLoadModule ( hProc,
-                               nullptr,
-                                pszShortName,
-                                  nullptr,
-                                    BaseAddr,
-                                      mod_info.SizeOfImage );
-
-          dbghelp_callers.insert (hModSource);
-        }
-      }
-
-      SYMBOL_INFO_PACKAGE sip = { };
-
-      sip.si.SizeOfStruct = sizeof SYMBOL_INFO;
-      sip.si.MaxNameLen   = sizeof sip.name;
-
-      DWORD64 Displacement = 0;
-
-      if ( SymFromAddr ( hProc,
-               static_cast <DWORD64> (ip),
-                             &Displacement,
-                               &sip.si ) )
-      {
-        DWORD Disp = 0x00UL;
-
-#ifdef _M_AMD64
-        IMAGEHLP_LINE64 ihl              = {                    };
-                        ihl.SizeOfStruct = sizeof IMAGEHLP_LINE64;
-#else /* _M_IX86 */
-        IMAGEHLP_LINE   ihl              = {                  };
-                        ihl.SizeOfStruct = sizeof IMAGEHLP_LINE;
-#endif
-        BOOL bFileAndLine =
-          SK_SymGetLineFromAddr ( hProc, ip, &Disp, &ihl );
-
-        auto AddStackEntry =
-          [&](void) -> void
-        {
-          stack_entries.emplace_back (
-            pszShortName, sip.si.Name
-          );
-
-          max_symbol_len =
-            std::max (stack_entries.back ().sym_len, max_symbol_len);
-          max_module_len =
-            std::max (stack_entries.back ().mod_len, max_module_len);
-        };
-
-        auto AddStackEntryWithFileAndLine =
-        [&](void) -> void
-        {
-          stack_entries.emplace_back (
-            pszShortName, sip.si.Name,
-              ihl.FileName, ihl.LineNumber
-          );
-
-          auto& entry =
-            stack_entries.back ();
-
-          max_symbol_len =
-            std::max (entry.sym_len, max_symbol_len);
-          max_module_len =
-            std::max (entry.mod_len, max_module_len);
-          max_file_len =
-            std::max (entry.file_len, max_file_len);
-        };
-
-        if (bFileAndLine)
-        {
-          AddStackEntryWithFileAndLine ();
-        }
-
-        else
-        {
-          AddStackEntry ();
-        }
-      }
-
-      if (hModSource)
-        SK_FreeLibrary (hModSource);
+      stack_entries.emplace_back (
+        szModule, symbol_name.c_str ()
+      );
     }
 
-    ret =
-      SK_StackWalk ( SK_RunLHIfBitness ( 32, IMAGE_FILE_MACHINE_I386,
-                                             IMAGE_FILE_MACHINE_AMD64 ),
-                       hProc,
-                         SK_GetCurrentThread (),
-                           &stackframe,
-                             &ctx,
-                               nullptr, nullptr,
-                                 nullptr, nullptr );
-  } while (ret != FALSE);
+    auto& entry =
+      stack_entries.back ();
+
+    max_symbol_len =
+      std::max (entry.sym_len,  max_symbol_len);
+    max_module_len =
+      std::max (entry.mod_len,  max_module_len);
+    max_file_len =
+      std::max (entry.file_len, max_file_len);
+  }
 
   for (auto& stack_entry : stack_entries)
   {
     if (stack_entry.line_number == 0)
     {
-      log_entry_format ( L" %*hs >  %#*hs\n",
+      log_entry_format ( L" %*hs >  %*hs\n",
                            max_module_len,
                            stack_entry.short_mod_name,
                              max_symbol_len,
@@ -1047,7 +1429,7 @@ SK_SEH_SummarizeException (_In_ struct _EXCEPTION_POINTERS* ExceptionInfo, bool 
     else
     {
       log_entry_format
-              ( L" %*hs >  %#*hs  <%*hs:%lu>\n",
+              ( L" %*hs >  %*hs  <%*hs:%lu>\n",
                max_module_len,   stack_entry.short_mod_name,
                  max_symbol_len, stack_entry.symbol_name,
                     max_file_len, stack_entry.file_name,
@@ -1055,7 +1437,7 @@ SK_SEH_SummarizeException (_In_ struct _EXCEPTION_POINTERS* ExceptionInfo, bool 
     }
   }
 
-  log_entry.append (L"-----------------------------------------------------------\n\n");
+  log_entry.append (L"--------------------------------------------------------------------------------------------------\n\n");
 
   return log_entry;
 }
@@ -1123,8 +1505,7 @@ SK_TopLevelExceptionFilter ( _In_ struct _EXCEPTION_POINTERS *ExceptionInfo )
   //  __debugbreak ();
   //}
 
-  static bool          run_once = false;
-  if (! std::exchange (run_once,  true))
+  SK_RunOnce (
   {
     std::wstring hw_status =
       L"==================================================================================================\n";
@@ -1139,6 +1520,7 @@ SK_TopLevelExceptionFilter ( _In_ struct _EXCEPTION_POINTERS *ExceptionInfo )
       pmc_ex    = {             };
       pmc_ex.cb = sizeof (pmc_ex);
 
+/*
 #if   0
     if (SK_WMI_CPUStats->num_cpus > 1)
     {
@@ -1172,6 +1554,7 @@ SK_TopLevelExceptionFilter ( _In_ struct _EXCEPTION_POINTERS *ExceptionInfo )
       log_entry.append (L"\n");
     }
 #endif
+*/
 
     if ( GetProcessMemoryInfo (
            GetCurrentProcess ( ), (PROCESS_MEMORY_COUNTERS *)&pmc_ex,
@@ -1234,8 +1617,8 @@ SK_TopLevelExceptionFilter ( _In_ struct _EXCEPTION_POINTERS *ExceptionInfo )
         hw_status.append (
           SK_FormatStringW (
             L"  - Current VRAM In Use....: %6.3f GiB / Max Useable VRAM: %6.3f GiB\n",
-            (float)((double)SK_GPU_GetVRAMUsed     (0) / (1024.0 * 1024.0 * 1024.0)),
-            (float)((double)SK_GPU_GetVRAMCapacity (0) / (1024.0 * 1024.0 * 1024.0 * 1024.0))
+            (float)((double)SK_GPU_GetVRAMUsed   (0) / (1024.0 * 1024.0 * 1024.0)),
+            (float)((double)SK_GPU_GetVRAMBudget (0) / (1024.0 * 1024.0 * 1024.0))
           )
         );
       }
@@ -1246,7 +1629,7 @@ SK_TopLevelExceptionFilter ( _In_ struct _EXCEPTION_POINTERS *ExceptionInfo )
     );
 
     crash_log->LogEx (false, L"\n%ws\n\n", hw_status.c_str ());
-  }
+  });
 
 #ifdef    _M_AMD64
 #  define _IP       Rip
@@ -1293,6 +1676,12 @@ SK_TopLevelExceptionFilter ( _In_ struct _EXCEPTION_POINTERS *ExceptionInfo )
   repeat_sequence =
     ( repeated ? ++repeat_sequence
                :   0 );
+
+  if (ExceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_MSVC_CPP)
+  {
+    // Immediately crash out rather than returning execution to the [[noreturn]] function that raised this exception.
+    repeat_sequence = 2;
+  }
 
   last_ctx = *ExceptionInfo->ContextRecord;
   last_exc = *ExceptionInfo->ExceptionRecord;
@@ -1535,7 +1924,7 @@ SK_TopLevelExceptionFilter ( _In_ struct _EXCEPTION_POINTERS *ExceptionInfo )
     if (pTLS != nullptr)
         pTLS->debug.last_chance = true;
 
-    wchar_t   wszFindPattern [MAX_PATH + 2] = { };
+    wchar_t   wszFindPattern [MAX_PATH * 2 + 1] = { };
     lstrcatW (wszFindPattern, SK_GetConfigPath ());
     lstrcatW (wszFindPattern,    LR"(logs\*.log)");
 
@@ -1545,9 +1934,9 @@ SK_TopLevelExceptionFilter ( _In_ struct _EXCEPTION_POINTERS *ExceptionInfo )
 
     if (hFind != INVALID_HANDLE_VALUE)
     {
-      wchar_t wszBaseDir [MAX_PATH + 2] = { };
-      wchar_t wszOutDir  [MAX_PATH + 2] = { };
-      wchar_t wszTime    [MAX_PATH + 2] = { };
+      wchar_t wszBaseDir [MAX_PATH * 2 + 1] = { };
+      wchar_t wszOutDir  [MAX_PATH * 2 + 1] = { };
+      wchar_t wszTime    [MAX_PATH * 2 + 1] = { };
 
       lstrcatW (wszBaseDir, SK_GetConfigPath ( ));
       lstrcatW (wszBaseDir, LR"(logs\)");
@@ -1744,10 +2133,6 @@ SK_GetSymbolNameFromModuleAddr (      HMODULE     hMod,   uintptr_t addr,
                                     MAX_PATH )
        ) return 0;
 
-    char* pszShortName = szModName;
-
-    PathStripPathA (pszShortName);
-
     if ( dbghelp_callers.find (hMod) ==
          dbghelp_callers.cend (    ) && cs_dbghelp != nullptr && cs_dbghelp2 != nullptr )
     {
@@ -1755,11 +2140,15 @@ SK_GetSymbolNameFromModuleAddr (      HMODULE     hMod,   uintptr_t addr,
 
       if (! SymLoadModule64 ( GetCurrentProcess (),
                                 nullptr,
-                                  pszShortName,
+                                  szModName,   
                                     nullptr,
                                       BaseAddr,
                                         mod_info.SizeOfImage )
-         ) return 0;
+         )
+      {
+        if (GetLastError () != ERROR_SUCCESS)
+          return 0;
+      }
 
       dbghelp_callers.insert (hMod);
     }
@@ -1786,7 +2175,7 @@ SK_GetSymbolNameFromModuleAddr (      HMODULE     hMod,   uintptr_t addr,
     pszOut [0] = '\0';
 
     strncat             ( pszOut.data (), sip.si.Name,
-                            std::min (ulLen, sip.si.NameLen) );
+                            std::min (ulLen - 1, sip.si.NameLen) );
     ret =
       sk::narrow_cast <ULONG> (strlen (pszOut.data ()));
   }
@@ -1876,7 +2265,7 @@ CrashHandler::InitSyms (void)
   static volatile LONG               init = 0L;
   if (! InterlockedCompareExchange (&init, 1, 0))
   {
-    if (config.system.handle_crashes)
+    if (config.system.handle_crashes && cs_dbghelp != nullptr && cs_dbghelp2 != nullptr)
     {
       std::scoped_lock auto_lock { *cs_dbghelp, *cs_dbghelp2 };
 
