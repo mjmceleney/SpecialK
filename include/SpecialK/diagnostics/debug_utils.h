@@ -694,6 +694,31 @@ SK_DbgHlp_Callers (void);
 
 #define dbghelp_callers SK_DbgHlp_Callers ()
 
+struct SK_DbgHlp_StackFrame
+{
+  DWORD64 address      = 0;
+  HMODULE hModule      = nullptr;
+  bool    inline_frame = false;
+  bool    has_symbol   = false;
+  DWORD   line_number  = 0; // 0 = No file and line info
+
+  char    module_name [MAX_PATH + 2] = { }; // Short name
+  char    symbol_name [512]          = { };
+  char    file_name   [MAX_PATH + 2] = { };
+
+  // Symbol name, or module+offset / raw address if no symbol is known
+  std::string describe (void) const;
+};
+
+// Walks hThread's stack beginning at ctx, which must contain at least
+//   CONTEXT_CONTROL | CONTEXT_INTEGER; inlined functions get their own
+//     frames and frames that cannot be symbolized are still reported.
+size_t
+SK_DbgHlp_WalkStack ( HANDLE                               hThread,
+                      const CONTEXT&                       ctx,
+                      std::vector <SK_DbgHlp_StackFrame>&  frames,
+                      size_t                               max_frames = 256 );
+
 
 // https://gist.github.com/TheWisp/26097ee941ce099be33cfe3095df74a6
 //
@@ -882,6 +907,8 @@ bool SK_Process_Resume      (DWORD dwPid);
 void WINAPI SK_OutputDebugStringW (LPCWSTR lpOutputString) noexcept;
 void WINAPI SK_OutputDebugStringA (LPCSTR  lpOutputString) noexcept;
 
+HMODULE SK_Debug_LoadHelper (void);
+
 using SetLastError_pfn   = void (WINAPI *)(_In_ DWORD dwErrCode);
 using GetProcAddress_pfn = FARPROC (WINAPI *)(HMODULE,LPCSTR);
 using CloseHandle_pfn    = BOOL (WINAPI *)(HANDLE);
@@ -892,7 +919,7 @@ using TerminateThread_pfn = BOOL (WINAPI *)( _In_ HANDLE hThread,
                                              _In_ DWORD  dwExitCode );
                                              using ExitThread_pfn = VOID (WINAPI *)(_In_ DWORD  dwExitCode);
 using _endthreadex_pfn = void (__cdecl *)( _In_ unsigned _ReturnCode );
-using NtTerminateProcess_pfn = NTSTATUS (*)(HANDLE, NTSTATUS);
+using NtTerminateProcess_pfn = NTSTATUS (NTAPI *)(HANDLE, NTSTATUS);
 using RtlExitUserThread_pfn = VOID (NTAPI *)(_In_ NTSTATUS 	Status);
 using SHGetKnownFolderPath_pfn = HRESULT (WINAPI *)(REFKNOWNFOLDERID,DWORD,HANDLE,PWSTR*);
 

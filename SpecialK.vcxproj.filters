@@ -3356,9 +3356,6 @@
     <ClCompile Include="src\log.cpp">
       <Filter>Source Files\Core</Filter>
     </ClCompile>
-    <ClCompile Include="src\adl.cpp">
-      <Filter>Source Files\Stats</Filter>
-    </ClCompile>
     <ClCompile Include="src\SpecialK.cpp">
       <Filter>Source Files\Core</Filter>
     </ClCompile>
@@ -3439,9 +3436,6 @@
     </ClCompile>
     <ClCompile Include="src\render\gl\opengl.cpp">
       <Filter>Source Files\Backends\Render\OpenGL</Filter>
-    </ClCompile>
-    <ClCompile Include="src\steam\steam_api.cpp">
-      <Filter>Source Files\Storefronts\Steam</Filter>
     </ClCompile>
     <ClCompile Include="src\performance\gpu_monitor.cpp">
       <Filter>Source Files\Stats</Filter>
@@ -3566,14 +3560,8 @@
     <ClCompile Include="src\diagnostics\memory.cpp">
       <Filter>Source Files\Diagnostics</Filter>
     </ClCompile>
-    <ClCompile Include="src\control_panel.cpp">
-      <Filter>Source Files\Control Panel</Filter>
-    </ClCompile>
     <ClCompile Include="src\thread.cpp">
       <Filter>Source Files\Diagnostics</Filter>
-    </ClCompile>
-    <ClCompile Include="src\nvapi.cpp">
-      <Filter>Source Files\Stats</Filter>
     </ClCompile>
     <ClCompile Include="src\imgui\imgui.cpp">
       <Filter>Source Files\ImGui</Filter>
@@ -3679,15 +3667,6 @@
     </ClCompile>
     <ClCompile Include="src\stdafx.cpp">
       <Filter>Source Files\Core</Filter>
-    </ClCompile>
-    <ClCompile Include="src\steam\client.cpp">
-      <Filter>Source Files\Storefronts\Steam\Wrapper</Filter>
-    </ClCompile>
-    <ClCompile Include="src\steam\user.cpp">
-      <Filter>Source Files\Storefronts\Steam\Wrapper</Filter>
-    </ClCompile>
-    <ClCompile Include="src\steam\utils.cpp">
-      <Filter>Source Files\Storefronts\Steam\Wrapper</Filter>
     </ClCompile>
     <ClCompile Include="src\plugins\persona4.cpp">
       <Filter>Source Files\Plugins</Filter>
@@ -3818,9 +3797,6 @@
     <ClCompile Include="src\storefront\platform.cpp">
       <Filter>Source Files\Storefronts</Filter>
     </ClCompile>
-    <ClCompile Include="src\popups\achievement.cpp">
-      <Filter>Source Files\OSD</Filter>
-    </ClCompile>
     <ClCompile Include="src\input\sce_pad.cpp">
       <Filter>Source Files\Backends\Input\scePad</Filter>
     </ClCompile>
@@ -3832,9 +3808,6 @@
     </ClCompile>
     <ClCompile Include="src\render\d3d12\d3d12_command_queue.cpp">
       <Filter>Source Files\Backends\Render\D3D12</Filter>
-    </ClCompile>
-    <ClCompile Include="src\steam\steam_tier0.cpp">
-      <Filter>Source Files\Storefronts\Steam</Filter>
     </ClCompile>
     <ClCompile Include="src\render\d3d12\d3d12_pipeline_library.cpp">
       <Filter>Source Files\Backends\Render\D3D12</Filter>
@@ -3913,9 +3886,6 @@
     </ClCompile>
     <ClCompile Include="src\render\ngx\ngx.cpp">
       <Filter>Source Files\Backends\Render\NGX</Filter>
-    </ClCompile>
-    <ClCompile Include="src\plugins\lords_of_the_fallen2.cpp">
-      <Filter>Source Files\Plugins</Filter>
     </ClCompile>
     <ClCompile Include="src\input\hid.cpp">
       <Filter>Source Files\Backends\Input\HID</Filter>
@@ -3999,6 +3969,33 @@
       <Filter>Source Files\Plugins</Filter>
     </ClCompile>
     <ClCompile Include="src\wgc\wgc_registrar.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\control_panel\control_panel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\widgets\popups\achievement.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\storefront\steam\client.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\storefront\steam\steam_api.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\storefront\steam\user.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\storefront\steam\utils.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\render\adl.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\render\nvapi.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\plugins\lords_of_the_fallen2.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

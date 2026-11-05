@@ -1,6 +1,4 @@
-﻿// This is an open source non-commercial project. Dear PVS-Studio, please check it.
-// PVS-Studio Static Code Analyzer for C, C++, C#, and Java: https://pvs-studio.com
-/**
+﻿/**
  * This file is part of Special K.
  *
  * Special K is free software : you can redistribute it
@@ -118,23 +116,15 @@ SK_ImGui_ExemptOverlaysFromKeyboardCapture (void)
 
       if (bSteamOverlay/*|| bEpicOverlay*/)
       {
+        DWORD      dwFlagsShift   = 0x0;
         const BYTE bScancodeShift =
-          (BYTE)MapVirtualKey (vKeyShift, 0);
-
-        const DWORD dwFlagsShift =
-          ( bScancodeShift & 0xE0 ) == 0  ?
-                static_cast <DWORD> (0x0) :
-                static_cast <DWORD> (KEYEVENTF_EXTENDEDKEY);
+          SK_Keyboard_GetScancodeAndFlags (vKeyShift, dwFlagsShift);
 
         if (bSteamOverlay && bTabChanged)
         {
+          DWORD      dwFlagsSteam   = 0x0;
           const BYTE bScancodeSteam =
-            (BYTE)MapVirtualKey (vKeySteam, 0);
-
-          const DWORD dwFlagsSteam =
-            ( bScancodeSteam & 0xE0 ) == 0  ?
-                  static_cast <DWORD> (0x0) :
-                  static_cast <DWORD> (KEYEVENTF_EXTENDEDKEY);
+            SK_Keyboard_GetScancodeAndFlags (vKeySteam, dwFlagsSteam);
 
           SK_keybd_event ((BYTE)vKeyShift, bScancodeShift, dwFlagsShift, 0);
           SK_keybd_event ((BYTE)vKeySteam, bScancodeSteam, dwFlagsSteam, 0);
@@ -146,13 +136,9 @@ SK_ImGui_ExemptOverlaysFromKeyboardCapture (void)
 #if 0
         else if (bEpicOverlay && bF3Changed)
         {
+          DWORD      dwFlagsEpic   = 0x0;
           const BYTE bScancodeEpic =
-            (BYTE)MapVirtualKey (vKeyEpic, 0);
-
-          const DWORD dwFlagsEpic =
-            ( bScancodeEpic & 0xE0 ) == 0  ?
-                 static_cast <DWORD> (0x0) :
-                 static_cast <DWORD> (KEYEVENTF_EXTENDEDKEY);
+            SK_Keyboard_GetScancodeAndFlags (vKeyEpic, dwFlagsEpic);
 
           SK_keybd_event ((BYTE)vKeyShift, bScancodeShift, dwFlagsShift, 0);
           SK_keybd_event ((BYTE)vKeyEpic,  bScancodeEpic,  dwFlagsEpic,  0);
@@ -162,13 +148,9 @@ SK_ImGui_ExemptOverlaysFromKeyboardCapture (void)
 
       else if (bReShadeOverlay && bHomeChanged)
       {
+        DWORD      dwFlagsReShade   = 0x0;
         const BYTE bScancodeReShade =
-          (BYTE)MapVirtualKey (vKeyReShade, 0);
-
-        const DWORD dwFlagsReShade =
-          ( bScancodeReShade & 0xE0 ) == 0 ?
-                 static_cast <DWORD> (0x0) :
-                 static_cast <DWORD> (KEYEVENTF_EXTENDEDKEY);
+          SK_Keyboard_GetScancodeAndFlags (vKeyReShade, dwFlagsReShade);
 
         SK_keybd_event ((BYTE)vKeyReShade, bScancodeReShade, dwFlagsReShade, 0);
         SK_keybd_event ((BYTE)vKeyReShade, bScancodeReShade, dwFlagsReShade | KEYEVENTF_KEYUP, 0);
@@ -369,7 +351,7 @@ SK_keybd_event (
 {
   static concurrency::concurrent_queue <SK_Win32_KeybdEvent> _keybd_events;
   static HANDLE                                               hInputEvent =
-    SK_CreateEvent (nullptr, FALSE, FALSE, L"[SK] Input Synthesis Requested");
+    SK_CreateEvent (nullptr, FALSE, FALSE, nullptr);//L"[SK] Input Synthesis Requested");
 
   static HANDLE hKeyboardSynthesisThread =
     SK_Thread_CreateEx ([](LPVOID)->DWORD
@@ -380,7 +362,7 @@ SK_keybd_event (
         { __SK_DLL_TeardownEvent,
                      hInputEvent };
 
-      while ( WAIT_OBJECT_0 !=
+      while ( (WAIT_OBJECT_0 + 1) ==
                 WaitForMultipleObjects (2, hSignals, FALSE, INFINITE) )
       {
         while (! _keybd_events.empty ())
@@ -410,6 +392,21 @@ SK_keybd_event (
   );
 
   SetEvent (hInputEvent);
+}
+
+BYTE
+SK_Keyboard_GetScancodeAndFlags (UINT vKey, DWORD& dwFlags) noexcept
+{
+  // MAPVK_VK_TO_VSC (0) never includes the 0xE0 prefix, and its scancodes
+  //   can't be used to tell extended keys apart (i.e. LAlt = 0x38 = RAlt).
+  const UINT uiScancode =
+    MapVirtualKey (vKey, MAPVK_VK_TO_VSC_EX);
+
+  if (HIBYTE (uiScancode) == 0xE0)
+    dwFlags |= KEYEVENTF_EXTENDEDKEY;
+
+  return
+    LOBYTE (uiScancode);
 }
 
 GetKeyState_pfn      GetKeyState_Original      = nullptr;
@@ -613,39 +610,6 @@ GetKeyboardState_Detour (PBYTE lpKeyState) noexcept
 
   return bRet;
 }
-
-
-typedef HKL (WINAPI *GetKeyboardLayout_pfn)(_In_ DWORD idThread);
-                     GetKeyboardLayout_pfn
-                     GetKeyboardLayout_Original = nullptr;
-
-SK_LazyGlobal <concurrency::concurrent_unordered_map <DWORD, HKL>> CachedHKL;
-
-void
-SK_Win32_InvalidateHKLCache (void)
-{
-  CachedHKL->clear ();
-}
-
-HKL
-WINAPI
-GetKeyboardLayout_Detour (_In_ DWORD idThread)
-{
-  const auto& ret =
-    CachedHKL->find (idThread);
-
-  if (ret != CachedHKL->cend ())
-    return ret->second;
-
-
-  HKL current_hkl =
-    GetKeyboardLayout_Original (idThread);
-
-  CachedHKL.get ()[idThread] = current_hkl; //-V108
-
-  return current_hkl;
-}
-
 
 SK_LazyGlobal <std::unordered_map <char, char>> SK_Keyboard_LH_Arrows;
 

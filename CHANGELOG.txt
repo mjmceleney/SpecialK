@@ -1,4 +1,131 @@
-﻿26.10.30
+﻿26.11.3.3
+=========
+ + Use StackWalk{64}Ex (...) instead of StackWalk{64} (...) in SK's
+     crash handler in order to report inline functions in the callstack.
+ + Added decoding of MSVC C++ exceptions that reach the crash handler, for
+     more sensible crash reports when C++ exceptions rather than structured
+       exceptions are the cause of a crash.
+
+26.11.3.2
+=========
+ + Use "SDL_JOYSTICK_DIRECTINPUT" instead of "SDL_HINT_JOYSTICK_DIRECTINPUT"
+     when setting the environment variable, the latter is just the C macro.
+ + Same as above for "SDL_FORCE_RAISEWINDOW".
+ + In the failure case for SK_XInput_GetBatteryInformation (...), set the
+     minimum retry interval to 5 seconds as intended.
+ + Removed unused SK_SDL_ShutdownInput (...) function.
+ + Rewrite SK_Input_ReleaseCommonStuckKeys (...) to correctly distinguish
+     Left/Right Alt, Shift and Ctrl keys.
+ + Removed WM_DPICHANGED handler.
+ + Handle possible crash if WM_MOUSELEAVE is received before ImGui init.
+
+26.11.3.1
+=========
+ + Fixed SK_keybd_event (...) signaling itself and any other game that also
+     has SK injected instead of just itself.
+ + Removed dead keyboard layout caching code.
+ + Run keyboard & mouse blocking exemption tests for ReShade overlay once
+     per-frame instead of once per-input.
+
+26.11.3
+=======
+ + Addressed buffer overrun issues in crash_handler.cpp.
+ + Fixed crash handler not reinstalling itself correctly in some cases.
+ + Improved accuracy of stack unwinds in crash handler.
+ + Fixed incorrect VRAM capacity reported in crash logs.
+
+26.11.2.2
+=========
+ + Fixed various potential buffer overflows in config.cpp and debug_utils.cpp.
+ + Fixed problems if more than 8 DLLs are configured to load as plug-ins.
+ + Fixed \\.\DISPLAY1 matching \\.\DISPLAY10 in some cases.
+ + Correctly null-terminate strings assigned to keys in
+     HKCU\SOFTWARE\Kaldaien\Special K\Local
+
+26.11.2.1
+=========
+ + Set environment variables one-by-one instead of overwriting the
+     enviornment block since that requires locking memory.
+ + Added SK_IGNORE_STEAM_INPUT environment variable; if set to a non-zero
+     value then SK will leave Steam Input in a broken undefined state instead
+       of trying to workaround its god awful design decisions.
+
+26.11.2
+=======
+ + Added new INI option to set Environment Variables when SK injects.
+
+    [Compatibility.General]
+    EnvironmentVars={A=1|B=2|C=3}  Default: (empty)
+
+   * Use || to include a literal pipe in a variable's value, e.g.:
+       A=1||2|B=3 sets A = 1|2 and B = 3
+
+   @ This is intended to control third-party mods/overlays; the vars
+       are set too late for most games to notice, but things like ReShade
+         are loaded late enough that they will read the injected vars.
+
+26.11.1.1
+=========
+ + Fixed incorrect DLSS Framegen Menu framerate limit being applied if
+     Latent Sync is active.
+ + Do not show battery low warnings while batteries are charging.
+ + Fixed log silence mode to actually delete the log file.
+ + Handle dummy window cleanup better.
+ + Avoid trying to locate SKIF's window every frame if global injection
+     is inactive and SKIF is not running.
+ + Properly convert ANSI to UTF-16 filesystem paths in RunDLL_Extract7Zip.
+ + Properly escape PCGW redirection URLs instead of passing Unicode
+     characters in URL.
+
+26.11.1
+=======
+ + Optimized SK_ScanAlignedEx (...) and added stricter HANDLE validation.
+ + Replace checks for HANDLE values > 0 with SK_AutoHandle::isValid () to
+     allow all HANDLE values except for 0 and INVALID_HANDLE_VALUE (-1).
+
+26.10.31.3
+==========
+ + Fixed mask bits not applying in calls to SKX_ScanAlignedEx (...).
+
+26.10.31.2
+==========
+ + Changed pattern scanning code to more efficiently skip non-executable
+     pages of memory. THIS MAY BREAK EXISTING MODS.
+ + Cleanup SK_DeleteTemporaryFiles (...).
+
+26.10.31.1
+==========
+ + Increased precision on SK_timeGetTimeFloat (...).
+ + SK_GetCanonicalDLLForRole (DLL_ROLE role) returns vulkan-1.dll
+     instead of vk-1.dll for DLL_ROLE::Vulkan.
+ + Fixed potential deadlock in SK_SuspendAllOtherThreads (...) due to
+     heap memory allocation while threads holding the heap lock are
+       suspended.
+ + Fixed SK_RestartGame (...) terminating instead of restarting if the
+     command line arguments exceeded 1040 characters.
+ + Fixed problems in SK_Generate8Dot3 (...) for files with spaces in
+     them, and for files with extensions longer than three characters.
+ + Fixed SK_File_FullCopy (...) deleting the destination file it is
+     supposed to overwrite before knowing if a copy is even possible.
+ + Fixed SK_Path_wcsrchr (...) hanging if the letter is absent.
+ + Fixed premature null-termination in SK_StripLeadingSlashesW (...).
+ + Fixed SK_StripUserNameFromPathA (...) not actually doing anything,
+     and changed both ..FromPathA (...) and ..FromPathW (...) to remove
+       all instances of a user's name if they appear more than once.
+    * Made both functions case insensitive.
+ + Fixed out-of-bounds write in SK_FormatStringView (...).
+ + Fixed possible buffer overflow in SK_GetDocumentsDir (...).
+ + Fixed formatting issues with SK_RemoveTrailingDecimalZeros (...).
+ + Fixed missing memory state flags in SK_ValidatePointer (...).
+ + Avoid holding a reference to the DXGI SwapChain while waiting for a
+     screenshot transfer to complete in D3D11.
+ + Reduce redundant INI file writes.
+
+26.10.31
+========
+ + Fixed 3 Win32 Event HANDLE leaks per-DLL injection.
+
+26.10.30
 ========
  + Default the framepacing widget to display Disk Load % and VRAM
      Budget for new users, instead of configuring these manually.

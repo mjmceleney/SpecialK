@@ -80,11 +80,6 @@ void SK_Input_InitKeyboard (void);
 void SK_Input_ReleaseCommonStuckKeys (void) noexcept;
 void SK_Input_SetLatencyMarker       (void) noexcept;
 
-// SK doesn't use SDL, but many games crash on exit due to polling
-//   joystick after XInput is unloaded... so we'll just terminate
-//     the thread manually so it doesn't crash.
-void SK_SDL_ShutdownInput (void);
-
 BOOL __stdcall SK_IsConsoleVisible (void) noexcept;
 
 SHORT WINAPI SK_GetAsyncKeyState (int vKey) noexcept;
@@ -1377,6 +1372,11 @@ SK_keybd_event (
   _In_ DWORD     dwFlags,
   _In_ ULONG_PTR dwExtraInfo
 );
+
+// Returns the scancode for vKey, and adds KEYEVENTF_EXTENDEDKEY to dwFlags
+//   if the key requires it (i.e. Right Ctrl/Alt, Windows keys, Home, ...)
+BYTE
+SK_Keyboard_GetScancodeAndFlags (UINT vKey, DWORD& dwFlags) noexcept;
 
 void
 WINAPI
