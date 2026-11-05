@@ -1,4 +1,22 @@
-﻿26.11.3.3
+﻿26.11.4.1
+=========
+ + Validate the correct memory address (vtable 0) for exec privs when detouring
+     SteamAPI_RegisterCallback (...) rather than the base address of the class;
+       prevented some games from getting achievements.
+ + Add blocking wait for GPU vendor API initialization (ADL, NVAPI, etc.) to
+     finish before letting hooked calls to CreateDXGIFactory{1|2} (...) or
+       IDXGIFactory[2]::CreateSwapChain[ForHwnd] (...) execute.
+
+26.11.4
+=======
+ + Optimized Thread Local Storage (TLS) management and re-enabled the raw TEB
+     fastpath that used to crash in modified versions of Cyberpunk 2077.
+ + Always disable D3D9 hooks in Chrono Trigger and enable OpenGL hooks;
+     FMVs do not work otherwise.
+ + Merged pull request #395 from Aemony:main
+    * Drops hardcoded VCToolsVersion and enables builds in parallel.
+
+26.11.3.3
 =========
  + Use StackWalk{64}Ex (...) instead of StackWalk{64} (...) in SK's
      crash handler in order to report inline functions in the callstack.

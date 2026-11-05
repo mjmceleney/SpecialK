@@ -265,22 +265,28 @@ SK_StartPerfMonThreads (void)
   }
 }
 
+static volatile LONG __SK_GPUVendorAPIs_Loaded = FALSE;
+
 void
 SK_LoadGPUVendorAPIs (void)
 {
+  bool        init_once = true;
+  SK_RunOnce (init_once = false);
+  if (        init_once)
+    return;
+
   sk::NVAPI::nvwgf2umx =
     SK_GetModuleHandleW (L"nvwgf2umx.dll");
 
-#define THREADED_VENDOR_API_INIT
+//#define THREADED_VENDOR_API_INIT
 
 #ifdef THREADED_VENDOR_API_INIT
   static HANDLE hVendorInitThread =
   SK_Thread_CreateEx ([](LPVOID)->DWORD
   {
+    SK_Thread_SetCurrentPriority (THREAD_PRIORITY_TIME_CRITICAL);
 #endif
     SK_PROFILE_FIRST_CALL
-
-    SK_Thread_SetCurrentPriority (THREAD_PRIORITY_TIME_CRITICAL);
 
     dll_log->LogEx (false, L"================================================"
                            L"===========================================\n" );
@@ -468,12 +474,23 @@ SK_LoadGPUVendorAPIs (void)
                              L"===========================================\n" );
     }
 
+    InterlockedIncrement (&__SK_GPUVendorAPIs_Loaded);
+
 #ifdef THREADED_VENDOR_API_INIT
     SK_Thread_CloseSelf ();
 
     return 0;
   }, L"[SK] GPU Vendor API Init");
 #endif
+}
+
+void
+WaitForGPUInit (void)
+{
+  // Kickstart vendor GPU init early if necessary.
+  SK_RunOnce (SK_LoadGPUVendorAPIs ());
+
+  SK_Thread_SpinUntilAtomicMin (&__SK_GPUVendorAPIs_Loaded, 1);
 }
 
 void SK_FetchBuiltinSounds (bool strict_integrity_check)

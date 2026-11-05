@@ -1569,11 +1569,17 @@ SteamAPI_RegisterCallback_Detour (class CCallbackBase *pCallback, int iCallback)
     } break;
   }
 
-  if (SK_IsAddressExecutable             (pCallback))
+  if (SK_ValidatePointer (pCallback))
   {
-    if (true || //(! config.platform.achievements.pull_friend_stats) //< Temporarily skip while achievement popups are not implemented
-                 iCallback != UserStatsReceived_t::k_iCallback)
-      SteamAPI_RegisterCallback_Original (pCallback, iCallback);
+    void** vftable =
+      *(void ***)*(&pCallback);
+
+    if (SK_IsAddressExecutable (vftable [0]))
+    {
+      if (true || //(! config.platform.achievements.pull_friend_stats) //< Temporarily skip while achievement popups are not implemented
+                   iCallback != UserStatsReceived_t::k_iCallback)
+        SteamAPI_RegisterCallback_Original (pCallback, iCallback);
+    }
   }
 
   if (steam_callback_cs != nullptr)
@@ -4475,19 +4481,15 @@ SteamAPI_Init_Detour (void)
 
   bool bRet = false;
 
-  if (steam_init_cs != nullptr)
-      steam_init_cs->lock ();
-
   // In case we already initialized stuff...
   if (ReadAcquire (&__SK_Steam_init))
   {
-    bRet = SK_SAFE_SteamAPI_Init ();
-
-    if (steam_init_cs != nullptr)
-        steam_init_cs->unlock ();
-
-    return bRet;
+    return
+      SK_SAFE_SteamAPI_Init ();
   }
+
+  if (steam_init_cs != nullptr)
+      steam_init_cs->lock ();
 
   static volatile LONG init_tries = -1;
 
