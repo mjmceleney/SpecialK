@@ -1798,6 +1798,7 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
     <ClInclude Include="include\SpecialK\render\ngx\ngx.h" />
     <ClInclude Include="include\SpecialK\render\ngx\ngx_defs.h" />
     <ClInclude Include="include\SpecialK\render\ngx\ngx_dlss.h" />
+    <ClInclude Include="include\SpecialK\render\ngx\ngx_ffx.h" />
     <ClInclude Include="include\SpecialK\render\ngx\streamline.h" />
     <ClInclude Include="include\SpecialK\render\present_mon\Debug.hpp" />
     <ClInclude Include="include\SpecialK\render\present_mon\ETW\Microsoft_Windows_D3D9.h" />
@@ -2109,6 +2110,9 @@ if exist "$(TargetDir)$(TargetName).exp" ( del "$(TargetDir)$(TargetName).exp" )
     <ClCompile Include="src\render\ngx\ngx.cpp" />
     <ClCompile Include="src\render\ngx\ngx_d3d11.cpp" />
     <ClCompile Include="src\render\ngx\ngx_d3d12.cpp" />
+    <ClCompile Include="src\render\ngx\ngx_ffx.cpp" />
+    <ClCompile Include="src\render\ngx\ngx_ffx_api.cpp" />
+    <ClCompile Include="src\render\ngx\ngx_ffx_legacy.cpp" />
     <ClCompile Include="src\render\ngx\ngx_vulkan.cpp" />
     <ClCompile Include="src\render\nvapi.cpp" />
     <ClCompile Include="src\render\present_mon\CommandLine.cpp">

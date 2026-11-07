@@ -250,6 +250,7 @@ extern void SK_NGX_EstablishDLSSDVersion  (const wchar_t* wszDLSS) noexcept;
 extern void SK_NGX_EstablishDLSSGVersion  (const wchar_t* wszDLSS) noexcept;
 extern void SK_NGX_EstablishDLSSVersion   (const wchar_t* wszDLSS) noexcept;
 extern void SK_NGX_Init                   (void);
+extern void SK_FFX_Init                   (void);
 extern void SK_DStorage_Init              (void);
 
 template <typename _T>
@@ -572,6 +573,14 @@ SK_TraceLoadLibrary (       HMODULE hCallingMod,
                 StrStrIW (wszCallingMod,     L"dstoragecore.dll") )
     {
       SK_RunOnce (SK_DStorage_Init ());
+    }
+    else if (   StrStrI ( lpFileName, SK_TEXT("amd_fidelityfx_dx12.dll"))        ||
+                StrStrI ( lpFileName, SK_TEXT("amd_fidelityfx_loader_dx12.dll")) ||
+                StrStrI ( lpFileName, SK_TEXT("ffx_fsr2_api_x64.dll"))           ||
+                StrStrI ( lpFileName, SK_TEXT("ffx_fsr3upscaler_x64.dll"))       ||
+                StrStrI ( lpFileName, SK_TEXT("ffx_fsr3_x64.dll")) )
+    {
+      SK_FFX_Init ();
     }
     else if (   StrStrI ( lpFileName, SK_TEXT("sl.interposer.dll")) ||
                 StrStrIW (wszCallingMod,     L"sl.interposer.dll") )

@@ -184,11 +184,19 @@ SK_ImGui_WantKeyboardCapture (bool update) noexcept
   }
 
   // Allow keyboard input while ReShade / Steam / EOS overlays are active
+  // This is called for every key a game polls, only write to config when the
+  //   value actually changes to avoid dirtying memory that every thread reads.
+  auto _SetDisabledToGame = [](auto& dest, auto value)
+  {
+    if (dest != value)
+        dest  = value;
+  };
+
   if (SK_ReShadeAddOn_IsOverlayActive () ||
       SK_Platform_GetOverlayState (true))
   {
-    config.input.mouse   .disabled_to_game = 2;
-    config.input.keyboard.disabled_to_game = 2;
+    _SetDisabledToGame (config.input.mouse   .disabled_to_game, 2);
+    _SetDisabledToGame (config.input.keyboard.disabled_to_game, 2);
     capture.store (false);
 
     return !SK_IsGameWindowActive ();
@@ -196,10 +204,10 @@ SK_ImGui_WantKeyboardCapture (bool update) noexcept
 
   else
   {
-    config.input.mouse.       disabled_to_game =
-    config.input.mouse.   org_disabled_to_game;
-    config.input.keyboard.    disabled_to_game =
-    config.input.keyboard.org_disabled_to_game;
+    _SetDisabledToGame (config.input.mouse.       disabled_to_game,
+                        config.input.mouse.   org_disabled_to_game);
+    _SetDisabledToGame (config.input.keyboard.    disabled_to_game,
+                        config.input.keyboard.org_disabled_to_game);
   }
 
   const auto framesDrawn =

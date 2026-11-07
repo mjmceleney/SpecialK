@@ -231,6 +231,20 @@ struct sk_config_t
           SK_CPU_HasMWAITX =
       SK_CPU_TestForMWAITX ();
 
+#ifndef SK_BUILT_BY_CLANG
+    ZeroMemory (cpuid, sizeof (int) * 4);
+
+    __cpuid (cpuid, 0x0);
+
+    if (cpuid [0] >= 0x7)
+    {
+      __cpuidex (cpuid, 0x7, 0x0);
+
+      // WAITPKG (TPAUSE / UMWAIT) = ECX Bit 5 (0000_0007h)
+      SK_CPU_HasWAITPKG = (cpuid [2] & (1 << 5)) != 0;
+    }
+#endif
+
     SK_PerfTicksPerMs = SK_PerfFreq / 1000LL;
   }
   struct whats_new_s {
@@ -827,6 +841,8 @@ struct sk_config_t
           float percent            =  0.5f;
         } auto_bias_target;
         bool  skip_frames          =   true;
+        bool  phase_lock           =   true; // Continuously track refresh phase
+        bool  pi_auto_bias         =   true; // PI controller for auto-bias
         bool  show_fcat_bars       =  false; // Not INI-persistent
 
         bool  flush_before_present  =  true;
@@ -836,6 +852,9 @@ struct sk_config_t
         bool  finish_after_present  =  true;
       } latent_sync;
       bool    use_amd_mwaitx       =   true;
+      bool    use_intel_tpause     =  false;
+      bool    adaptive_busy_wait   =   true; // Size busy-wait from measured timer error
+      bool    defer_low_latency_wait = true; // Limiter (Low-Latency) and Reflex sleep after SK's end-of-frame work
       struct streamline_s {
         bool  enable_native_limit  =   true;
         float target_fps           =   0.0f;
@@ -1120,7 +1139,7 @@ struct sk_config_t
     } reflex;
     struct dlss_s {
       bool    force_dlaa          =  false;
-      bool    auto_redirect_dlss  =  false;
+      bool    auto_redirect_dlss  =  false; // Also replaces FSR upscaling with DLSS
       std::wstring
               dlss_dll            =    L"";
       std::wstring
@@ -1139,6 +1158,8 @@ struct sk_config_t
       bool    streamline_dbg_out  =  false;
       float   dlssfg_menu_fps     =   0.0f;
       bool    slop_stop_5000      =  false;
+      bool    force_neural_render =  false; // Experimental: run DLSS 5 after DLSS-SR (D3D12)
+      bool    trace_neural_params =  false; // Log parameters DLSS 5 reads at create/evaluate
       struct {
         float performance         =   0.0f;
         float balanced            =   0.0f;

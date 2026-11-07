@@ -1847,7 +1847,7 @@ SK_MinHook_UnInit (void)
 
 #define SK_LEGACY_DEPRECATE_PUBLIC_API(old_fn,new_fn)                     \
   SK_LOG0 ( ( L"WARNING: '%ws' is deprecated, please use: '%ws' instead.",\
-              ##old_fn, ##new_fn ),                                       \
+              old_fn, _CRT_WIDE (#new_fn) ),                              \
               L"Deprecated" );                                            \
             return new_fn
 

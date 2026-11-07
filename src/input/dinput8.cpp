@@ -2004,7 +2004,7 @@ DI8_CallbackEnumDevicesA (LPCDIDEVICEINSTANCEA dev_inst, LPVOID pUser)
 
     SK_LOGs1 (
       L"DInput8",
-      L"dwSize: %d, guidInstance=%ws, guidProduct=%ws, dwDevType=%d, InstanceName=%hs, ProductName=%hs, FFDriver=%hs, UsagePage=%d, Usage=%d",
+      L"dwSize: %d, guidInstance=%ws, guidProduct=%ws, dwDevType=%d, InstanceName=%hs, ProductName=%hs, FFDriver=%ws, UsagePage=%d, Usage=%d",
       dev_inst->dwSize, wszInstance, wszProduct, dev_inst->dwDevType, dev_inst->tszInstanceName, dev_inst->tszProductName, wszFFDriver, dev_inst->wUsagePage, dev_inst->wUsage
     );
   }
@@ -2047,7 +2047,7 @@ DI8_CallbackEnumDevicesW (LPCDIDEVICEINSTANCEW dev_inst, LPVOID pUser)
 
     SK_LOGs1 (
       L"DInput8",
-      L"dwSize: %d, guidInstance=%ws, guidProduct=%ws, dwDevType=%d, InstanceName=%ws, ProductName=%ws, FFDriver=%hs, UsagePage=%d, Usage=%d",
+      L"dwSize: %d, guidInstance=%ws, guidProduct=%ws, dwDevType=%d, InstanceName=%ws, ProductName=%ws, FFDriver=%ws, UsagePage=%d, Usage=%d",
       dev_inst->dwSize, wszInstance, wszProduct, dev_inst->dwDevType, dev_inst->tszInstanceName, dev_inst->tszProductName, wszFFDriver, dev_inst->wUsagePage, dev_inst->wUsage
     );
   }

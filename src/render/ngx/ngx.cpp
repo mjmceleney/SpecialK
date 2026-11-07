@@ -24,6 +24,7 @@
 #include <SpecialK/stdafx.h>
 
 #include <SpecialK/render/ngx/ngx.h>
+#include <SpecialK/render/ngx/ngx_ffx.h>
 #include <SpecialK/nvapi.h>
 #include <imgui/font_awesome.h>
 
@@ -222,6 +223,79 @@ SK_NGX_EstablishDLLVersionFromAPICall (int operation, LPCVOID pReturn) noexcept
 
 static  unsigned  int SK_NGX_GameSetPerfQuality = 0;
 static constexpr bool SK_NGX_LogAllParams       = false;
+
+thread_local int      SK_NGX_TraceFeature       = -1;
+
+// Logs a parameter read made while a traced feature call is executing, by
+//   performing the read a second time through the unhooked function.
+template <typename _T, typename _Fn>
+static void
+SK_NGX_TraceGet (const NVSDK_NGX_Parameter* InParameter, const char* InName, _Fn original)
+{
+  if (SK_NGX_TraceFeature < 0 || InName == nullptr || original == nullptr)
+    return;
+
+  _T                     value = { };
+  const NVSDK_NGX_Result ret   =
+    original (InParameter, InName, &value);
+
+  std::wstring str_value;
+
+  if (NVSDK_NGX_FAILED (ret))
+    str_value = L"<not set>";
+  else if constexpr (std::is_same_v <_T, float> || std::is_same_v <_T, double>)
+    str_value = SK_FormatStringW (L"%f",   static_cast <double> (value));
+  else if constexpr (std::is_same_v <_T, int>)
+    str_value = SK_FormatStringW (L"%i",   value);
+  else if constexpr (std::is_same_v <_T, unsigned int>)
+    str_value = SK_FormatStringW (L"%u",   value);
+  else if constexpr (std::is_same_v <_T, unsigned long long>)
+    str_value = SK_FormatStringW (L"%llu", value);
+  else
+    str_value = SK_FormatStringW (L"%p",   value);
+
+  SK_LOGi0 ( L"[NGX Trace] Feature %d read %-48hs (%hs) = %ws",
+               SK_NGX_TraceFeature, InName, typeid (_T).name (), str_value.c_str () );
+}
+
+using NVSDK_NGX_Parameter_GetF_pfn           = NVSDK_NGX_Result (NVSDK_CONV *)(const NVSDK_NGX_Parameter *InParameter, const char* InName, float*           OutValue);
+using NVSDK_NGX_Parameter_GetD_pfn           = NVSDK_NGX_Result (NVSDK_CONV *)(const NVSDK_NGX_Parameter *InParameter, const char* InName, double*          OutValue);
+using NVSDK_NGX_Parameter_GetD3d12Resource_pfn = NVSDK_NGX_Result (NVSDK_CONV *)(const NVSDK_NGX_Parameter *InParameter, const char* InName, ID3D12Resource** OutValue);
+
+static NVSDK_NGX_Parameter_GetF_pfn             NVSDK_NGX_Parameter_GetF_Original             = nullptr;
+static NVSDK_NGX_Parameter_GetD_pfn             NVSDK_NGX_Parameter_GetD_Original             = nullptr;
+static NVSDK_NGX_Parameter_GetD3d12Resource_pfn NVSDK_NGX_Parameter_GetD3d12Resource_Original = nullptr;
+
+// These three are hooked only so that parameter tracing sees every type of read
+static NVSDK_NGX_Result
+NVSDK_CONV
+NVSDK_NGX_Parameter_GetF_Detour (const NVSDK_NGX_Parameter *InParameter, const char *InName, float *OutValue)
+{
+  SK_NGX_TraceGet <float> (InParameter, InName, NVSDK_NGX_Parameter_GetF_Original);
+
+  return
+    NVSDK_NGX_Parameter_GetF_Original (InParameter, InName, OutValue);
+}
+
+static NVSDK_NGX_Result
+NVSDK_CONV
+NVSDK_NGX_Parameter_GetD_Detour (const NVSDK_NGX_Parameter *InParameter, const char *InName, double *OutValue)
+{
+  SK_NGX_TraceGet <double> (InParameter, InName, NVSDK_NGX_Parameter_GetD_Original);
+
+  return
+    NVSDK_NGX_Parameter_GetD_Original (InParameter, InName, OutValue);
+}
+
+static NVSDK_NGX_Result
+NVSDK_CONV
+NVSDK_NGX_Parameter_GetD3d12Resource_Detour (const NVSDK_NGX_Parameter *InParameter, const char *InName, ID3D12Resource **OutValue)
+{
+  SK_NGX_TraceGet <ID3D12Resource *> (InParameter, InName, NVSDK_NGX_Parameter_GetD3d12Resource_Original);
+
+  return
+    NVSDK_NGX_Parameter_GetD3d12Resource_Original (InParameter, InName, OutValue);
+}
 
 // NGX return-code conversion-to-string utility only as a helper for debugging/logging - not for official use.
 GetNGXResultAsString_pfn                  GetNGXResultAsString                     = nullptr;
@@ -945,6 +1019,8 @@ NVSDK_NGX_Parameter_GetVoidPointer_Detour (const NVSDK_NGX_Parameter *InParamete
 
   SK_NGX_EstablishDLLVersionFromAPICall (SK_NGX_GetParameter);
 
+  SK_NGX_TraceGet <void *> (InParameter, InName, NVSDK_NGX_Parameter_GetVoidPointer_Original);
+
   SK_LOGn (((SK_NGX_LogAllParams == true) ? 0 : 2),
               L"NGX_Parameter_GetVoidPointer (%hs) - %ws", InName, SK_GetCallerName ().c_str ());
 
@@ -968,6 +1044,8 @@ NVSDK_NGX_Parameter_GetUI_Detour (const NVSDK_NGX_Parameter *InParameter, const 
   SK_LOG_FIRST_CALL
 
   SK_NGX_EstablishDLLVersionFromAPICall (SK_NGX_GetParameter);
+
+  SK_NGX_TraceGet <unsigned int> (InParameter, InName, NVSDK_NGX_Parameter_GetUI_Original);
 
   auto ret =
     NVSDK_NGX_Parameter_GetUI_Original (InParameter, InName, OutValue);
@@ -1063,6 +1141,8 @@ NVSDK_NGX_Parameter_GetI_Detour (const NVSDK_NGX_Parameter *InParameter, const c
 
   SK_NGX_EstablishDLLVersionFromAPICall (SK_NGX_GetParameter);
 
+  SK_NGX_TraceGet <int> (InParameter, InName, NVSDK_NGX_Parameter_GetI_Original);
+
   auto ret =
     NVSDK_NGX_Parameter_GetI_Original (InParameter, InName, OutValue);
 
@@ -1154,6 +1234,8 @@ NVSDK_NGX_Parameter_GetULL_Detour (const NVSDK_NGX_Parameter *InParameter, const
   SK_LOG_FIRST_CALL
 
   SK_NGX_EstablishDLLVersionFromAPICall (SK_NGX_GetParameter);
+
+  SK_NGX_TraceGet <unsigned long long> (InParameter, InName, NVSDK_NGX_Parameter_GetULL_Original);
 
   auto ret =
     NVSDK_NGX_Parameter_GetULL_Original (InParameter, InName, OutValue);
@@ -1823,14 +1905,32 @@ SK_NGX_HookParameters (NVSDK_NGX_Parameter* Params)
                              NVSDK_NGX_Parameter_GetULL_Detour,
     static_cast_p2p <void> (&NVSDK_NGX_Parameter_GetULL_Original) );
 
+  SK_CreateFuncHook (      L"NVSDK_NGX_Parameter::GetD3d12Resource",
+                             vftable [9],
+                             NVSDK_NGX_Parameter_GetD3d12Resource_Detour,
+    static_cast_p2p <void> (&NVSDK_NGX_Parameter_GetD3d12Resource_Original) );
+
+  SK_CreateFuncHook (      L"NVSDK_NGX_Parameter::GetD",
+                             vftable [13],
+                             NVSDK_NGX_Parameter_GetD_Detour,
+    static_cast_p2p <void> (&NVSDK_NGX_Parameter_GetD_Original) );
+
+  SK_CreateFuncHook (      L"NVSDK_NGX_Parameter::GetF",
+                             vftable [14],
+                             NVSDK_NGX_Parameter_GetF_Detour,
+    static_cast_p2p <void> (&NVSDK_NGX_Parameter_GetF_Original) );
+
   MH_QueueEnableHook (vftable [3]);
   MH_QueueEnableHook (vftable [4]);
   MH_QueueEnableHook (vftable [5]);
   MH_QueueEnableHook (vftable [6]);
   MH_QueueEnableHook (vftable [7]);
   MH_QueueEnableHook (vftable [8]);
+  MH_QueueEnableHook (vftable [9]);
   MH_QueueEnableHook (vftable [11]);
   MH_QueueEnableHook (vftable [12]);
+  MH_QueueEnableHook (vftable [13]);
+  MH_QueueEnableHook (vftable [14]);
   MH_QueueEnableHook (vftable [15]);
 
   SK_ApplyQueuedHooks ();
@@ -2413,6 +2513,20 @@ SK_NGX_DLSS_ControlPanel (void)
           {
             config.utility.save_async ();
           }
+
+          ImGui::BeginDisabled (config.nvidia.dlss.slop_stop_5000);
+
+          if (ImGui::Checkbox ("Force On After DLSS (Experimental)", &config.nvidia.dlss.force_neural_render))
+          {
+            config.utility.save_async ();
+          }
+
+          ImGui::SetItemTooltip (
+            "Runs DLSS 5 neural rendering after the game's DLSS Super Resolution (D3D12 only).\n\n"
+            "Requires nvngx_dlssnr.dll; feeds it the same parameters as DLSS-SR, which may not\n"
+            "be what it expects. Enable TraceNeuralRenderingParams in the INI to log its inputs." );
+
+          ImGui::EndDisabled ();
 
           ImGui::EndPopup ();
         }
@@ -3599,11 +3713,26 @@ SK_NGX_DLSS_ControlPanel (void)
       {
         if (bHasPlugInDLSS)
         {
-          if (ImGui::Checkbox ("Use Special K's DLSS instead of Game's DLL", &config.nvidia.dlss.auto_redirect_dlss))
+          // Running in place of the game's FSR, there is no game DLSS DLL to replace
+          const bool bReplacingFSR =
+            SK_FFX_IsReplacingFSR ();
+
+          if (ImGui::Checkbox (bReplacingFSR ? "Use Special K's DLSS instead of Game's FSR"
+                                             : "Use Special K's DLSS instead of Game's DLL", &config.nvidia.dlss.auto_redirect_dlss))
           {
             bRestartNeeded = true;
 
             config.utility.save_async ();
+          }
+
+          ImGui::SetItemTooltip (
+            "Loads nvngx_dlss.dll from Special K's plug-in directory in place of the game's copy.\n\n"
+            "In D3D12 games that ship FSR 2.x / 3.x as a DLL, DLSS also replaces the FSR upscaler." );
+
+          if (bReplacingFSR)
+          {
+            ImGui::SameLine    ();
+            ImGui::TextColored (ImVec4 (0.0f, 0.8f, 0.0f, 1.0f), ICON_FA_CHECK " FSR Replaced");
           }
         }
 
@@ -3765,7 +3894,81 @@ SK_NGX_DLSS_ControlPanel (void)
 
       ImGui::TreePop     ( );
     }
-  
+
+    ImGui::TreePop       ( );
+    ImGui::PopStyleColor (3);
+  }
+
+  // FSR game that is not running DLSS (yet), offer to replace its upscaler
+  else if (SK_FFX_IsFSRLoaded ())
+  {
+    ImGui::PushStyleColor (ImGuiCol_Header,        ImVec4 (0.90f, 0.68f, 0.02f, 0.45f));
+    ImGui::PushStyleColor (ImGuiCol_HeaderHovered, ImVec4 (0.90f, 0.72f, 0.07f, 0.80f));
+    ImGui::PushStyleColor (ImGuiCol_HeaderActive,  ImVec4 (0.87f, 0.78f, 0.14f, 0.80f));
+    ImGui::TreePush       ("");
+
+    if (ImGui::CollapsingHeader ("NVIDIA DLSS", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+      static bool bRestartNeeded = false;
+      static bool bHasPlugInDLSS = SK_FFX_HasPlugInDLSS ();
+
+      ImGui::TreePush ("");
+
+      if (bHasPlugInDLSS)
+      {
+        if (ImGui::Checkbox ("Use Special K's DLSS instead of Game's FSR", &config.nvidia.dlss.auto_redirect_dlss))
+        {
+          bRestartNeeded = true;
+
+          config.utility.save_async ();
+        }
+
+        ImGui::SetItemTooltip (
+          "Runs DLSS Super Resolution in place of the game's FSR 2.x / 3.x upscaler.\n\n"
+          "Only D3D12 games that ship FSR as a DLL are supported, FSR Frame Generation is unaffected." );
+
+        if (config.nvidia.dlss.auto_redirect_dlss && (! bRestartNeeded))
+        {
+          ImGui::TextUnformatted (ICON_FA_INFO_CIRCLE " DLSS takes over once the game's FSR upscaler runs.");
+          ImGui::SetItemTooltip  ("If FSR is enabled in-game and this persists, check SpecialK's log for FFX->DLSS messages.");
+        }
+      }
+
+      else
+      {
+        if (ImGui::Selectable (ICON_FA_INFO_CIRCLE " SK Can Replace This Game's FSR With DLSS..."))
+        {
+          const std::filesystem::path dlss_plugin_directory =
+            std::filesystem::path (SK_GetPlugInDirectory (SK_PlugIn_Type::ThirdParty)) / L"NVIDIA";
+
+          std::error_code                                    ec;
+          SK_CreateDirectories (dlss_plugin_directory.c_str ());
+          if (std::filesystem::exists (dlss_plugin_directory, ec))
+            SK_Util_ExplorePath (      dlss_plugin_directory.wstring ().c_str ());
+
+          bHasPlugInDLSS =
+            SK_FFX_HasPlugInDLSS ();
+        }
+
+        if (ImGui::IsItemHovered ())
+        {
+          ImGui::BeginTooltip ();
+          ImGui::BulletText   ("Click to Create the Plug-In Directory for DLSS.");
+          ImGui::BulletText   ("Place nvngx_dlss.dll in the Directory.");
+          ImGui::EndTooltip   ();
+        }
+      }
+
+      if (bRestartNeeded)
+      {
+        ImGui::PushStyleColor (ImGuiCol_Text, (ImVec4&&)ImColor::HSV (.1f, .8f, .9f));
+        ImGui::BulletText     ("Game Restart Required");
+        ImGui::PopStyleColor  ();
+      }
+
+      ImGui::TreePop ();
+    }
+
     ImGui::TreePop       ( );
     ImGui::PopStyleColor (3);
   }

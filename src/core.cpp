@@ -317,6 +317,9 @@ SK_LoadGPUVendorAPIs (void)
         SK_NGX_Init ();
       }
 
+      // Catches games that import the FidelityFX DLL statically (loaded before our LoadLibrary hooks)
+      SK_FFX_Init ();
+
       const int num_sli_gpus =
         sk::NVAPI::CountSLIGPUs ();
 
@@ -4844,24 +4847,39 @@ SK_EndBufferSwap (HRESULT hr, IUnknown* device, SK_TLS* pTLS)
         rb.api
   );
 
+  // When deferred, the limiter wait and Reflex sleep run at the very end of Present
+  //   (limiter first, then Reflex) so that SK's per-frame housekeeping does not sit
+  //     between wake-up and input sampling, and Reflex sleeps using current GPU state.
+  const bool bDeferLowLatencyWait =
+    config.render.framerate.defer_low_latency_wait;
+
   // Pacing the game's thread is unsupported or unwanted, so use traditional
   //   SwapChain sync instead...
-  if (! game_pace.wantPacing ())
+  const bool bDriverSleep =
+    (! game_pace.wantPacing ());
+
+  if (bDriverSleep && (! bDeferLowLatencyWait))
     rb.driverSleepNV (1);
 
-  if ((config.render.framerate.enforcement_policy == 2 && !rb.vulkan_reflex.isPacingEligible ()) || rb.vulkan_reflex.needsFallbackSleep ())
+  auto _LowLatencyTick = [&](void) -> void
   {
-    extern volatile NvU32 SK_Reflex_LastNativeSleepTime;
+    if ((config.render.framerate.enforcement_policy == 2 && !rb.vulkan_reflex.isPacingEligible ()) || rb.vulkan_reflex.needsFallbackSleep ())
+    {
+      extern volatile NvU32 SK_Reflex_LastNativeSleepTime;
 
-    bool should_wait = 
-      !(__SK_IsDLSSGActive && config.render.framerate.streamline.wantNativePacing ()) && (ReadULongAcquire (&SK_Reflex_LastNativeSleepTime) == 0 || ReadULongAcquire (&SK_Reflex_LastNativeSleepTime) < SK_timeGetTime () - 250) && !config.nvidia.reflex.use_limiter;
+      bool should_wait =
+        !(__SK_IsDLSSGActive && config.render.framerate.streamline.wantNativePacing ()) && (ReadULongAcquire (&SK_Reflex_LastNativeSleepTime) == 0 || ReadULongAcquire (&SK_Reflex_LastNativeSleepTime) < SK_timeGetTime () - 250) && !config.nvidia.reflex.use_limiter;
 
-    if (rb.swapchain.p != nullptr)
-      _FrameTick (should_wait);
+      if (rb.swapchain.p != nullptr)
+        _FrameTick (should_wait);
 
-    if (config.system.log_level > 0)
-      SK_ReleaseAssert (rb.swapchain.p != nullptr);
-  }
+      if (config.system.log_level > 0)
+        SK_ReleaseAssert (rb.swapchain.p != nullptr);
+    }
+  };
+
+  if (! bDeferLowLatencyWait)
+    _LowLatencyTick ();
 
   SK_RunOnce (
     SK::DXGI::StartBudgetThread_NoAdapter ()
@@ -4922,7 +4940,8 @@ SK_EndBufferSwap (HRESULT hr, IUnknown* device, SK_TLS* pTLS)
   }
 
 
-  if (config.render.framerate.enable_mmcss)
+  // Keep the MMCSS boost for the duration of a deferred Low-Latency wait
+  if (config.render.framerate.enable_mmcss && (! bDeferLowLatencyWait))
   {
     SK_MMCS_EndBufferSwap ();
   }
@@ -5102,6 +5121,19 @@ SK_EndBufferSwap (HRESULT hr, IUnknown* device, SK_TLS* pTLS)
   if (game_window.size_move)
   {
     SK_Window_RepositionIfNeeded ();
+  }
+
+  if (bDeferLowLatencyWait)
+  {
+    _LowLatencyTick ();
+
+    if (bDriverSleep)
+      rb.driverSleepNV (1);
+
+    if (config.render.framerate.enable_mmcss)
+    {
+      SK_MMCS_EndBufferSwap ();
+    }
   }
 
   game_pace.signalEvent ();

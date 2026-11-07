@@ -926,6 +926,8 @@ struct {
     sk::ParameterBool*    spoof_feature_support   = nullptr;
     sk::ParameterBool*    streamline_dbg_out      = nullptr;
     sk::ParameterBool*    slop_stop_5000          = nullptr;
+    sk::ParameterBool*    force_neural_render     = nullptr;
+    sk::ParameterBool*    trace_neural_params     = nullptr;
     sk::ParameterFloat*   dlssfg_menu_fps         = nullptr;
   } dlss;
 } nvidia;
@@ -1003,6 +1005,9 @@ struct {
     sk::ParameterBool*    auto_low_latency_reapply= nullptr;
     sk::ParameterBool*    enable_etw_tracing      = nullptr;
     sk::ParameterBool*    use_amd_mwaitx          = nullptr;
+    sk::ParameterBool*    use_intel_tpause        = nullptr;
+    sk::ParameterBool*    adaptive_busy_wait      = nullptr;
+    sk::ParameterBool*    defer_low_latency_wait  = nullptr;
     sk::ParameterBool*    apply_streamline_pacing = nullptr;
     sk::ParameterInt*     streamline_pacing_mode  = nullptr;
     sk::ParameterBool*    ignore_environment_vars = nullptr;
@@ -1035,6 +1040,8 @@ struct {
       sk::ParameterFloat*   max_auto_bias         = nullptr;
       sk::ParameterStringW* auto_bias_target      = nullptr;
       sk::ParameterBool*    skip_frames           = nullptr;
+      sk::ParameterBool*    phase_lock            = nullptr;
+      sk::ParameterBool*    pi_auto_bias          = nullptr;
     } latent_sync;
   } framerate;
 
@@ -2153,6 +2160,9 @@ auto DeclKeybind =
     ConfigEntry (render.framerate.enforcement_policy,    L"Place Framerate Limiter Wait Before/After Present, etc.",   dll_ini,         L"Render.FrameRate",      L"LimitEnforcementPolicy"),
     ConfigEntry (render.framerate.enable_etw_tracing,    L"Use ETW tracing (PresentMon) for extra latency/flip info",  dll_ini,         L"Render.FrameRate",      L"EnableETWTracing"),
     ConfigEntry (render.framerate.use_amd_mwaitx,        L"Use AMD Power-Saving Instructions for Busy-Wait",           dll_ini,         L"Render.FrameRate",      L"UseAMDMWAITX"),
+    ConfigEntry (render.framerate.use_intel_tpause,      L"Use Intel Power-Saving Instructions for Busy-Wait",         dll_ini,         L"Render.FrameRate",      L"UseIntelTPAUSE"),
+    ConfigEntry (render.framerate.adaptive_busy_wait,    L"Size Busy-Wait Using Measured Timer Accuracy",              dll_ini,         L"Render.FrameRate",      L"AdaptiveBusyWait"),
+    ConfigEntry (render.framerate.defer_low_latency_wait,L"Limiter/Reflex Sleep After SK's End-of-Frame Work",         dll_ini,         L"Render.FrameRate",      L"DeferLowLatencyWait"),
     ConfigEntry (render.framerate.
                                 apply_streamline_pacing, L"Apply Pacing to Native frames when using DLSS Frame Gen.",  dll_ini,         L"Render.FrameRate",      L"EnableStreamlinePacing"),
     ConfigEntry (render.framerate.
@@ -2181,6 +2191,10 @@ auto DeclKeybind =
                                           max_auto_bias, L"Maximum percentage to bias towards low input latency",      dll_ini,         L"FrameRate.LatentSync",  L"MaxAutoBias"),
     ConfigEntry (render.framerate.latent_sync.
                                             skip_frames, L"Enable __SK_LatentSyncSkip in 2x.. mode",                   dll_ini,         L"FrameRate.LatentSync",  L"SkipFrames"),
+    ConfigEntry (render.framerate.latent_sync.
+                                             phase_lock, L"Continuously Track Refresh Phase Instead of Periodic Resync",dll_ini,         L"FrameRate.LatentSync",  L"PhaseLock"),
+    ConfigEntry (render.framerate.latent_sync.
+                                           pi_auto_bias, L"Use a PI Controller for Auto Bias",                         dll_ini,         L"FrameRate.LatentSync",  L"PIAutoBias"),
 
     ConfigEntry (render.framerate.force_vk_mailbox,      L"Force Vulkan to use Mailbox Presentation Mode",             dll_ini,         L"Render.Vulkan",         L"ForceMailboxPresent"),
     ConfigEntry (render.framerate.force_vk_adaptive,     L"Force Vulkan to use FIFO Relaxed Presentation Mode",        dll_ini,         L"Render.Vulkan",         L"ForceAdaptiveVSYNC"),
@@ -2210,7 +2224,7 @@ auto DeclKeybind =
     ConfigEntry (nvidia.dlss.force_dlaa,                 L"Force DLAA in games that do not normally support it",       dll_ini,         L"NVIDIA.DLSS",           L"ForceDLAA"),
     ConfigEntry (nvidia.dlss.use_sharpening,             L"Override DLSS Sharpening Mode",                             dll_ini,         L"NVIDIA.DLSS",           L"UseSharpening"),
     ConfigEntry (nvidia.dlss.forced_sharpness,           L"Sharpness Value to Use",                                    dll_ini,         L"NVIDIA.DLSS",           L"ForcedSharpness"),
-    ConfigEntry (nvidia.dlss.auto_redirect_dll,          L"Always load SK's Plug-In DLSS DLL instead of the game's",   dll_ini,         L"NVIDIA.DLSS",           L"AutoRedirectDLL"),
+    ConfigEntry (nvidia.dlss.auto_redirect_dll,          L"Use SK's Plug-In DLSS DLL instead of the game's DLSS / FSR", dll_ini,         L"NVIDIA.DLSS",           L"AutoRedirectDLL"),
     ConfigEntry (nvidia.dlss.forced_preset,              L"Override DLSS Perf/Quality Level's Preset",                 dll_ini,         L"NVIDIA.DLSS",           L"ForcePreset"),
     ConfigEntry (nvidia.dlss.forced_rr_preset,           L"Override Ray Reconstruction Perf/Quality Level's Preset",   dll_ini,         L"NVIDIA.DLSS",           L"ForcePresetRR"),
     ConfigEntry (nvidia.dlss.forced_auto_exposure,       L"Override DLSS Auto Exposure",                               dll_ini,         L"NVIDIA.DLSS",           L"ForcedAutoExposure"),
@@ -2232,6 +2246,8 @@ auto DeclKeybind =
     ConfigEntry (nvidia.dlss.spoof_feature_support,      L"Report all NGX (D3D11/D3D12) features supported on all HW.",dll_ini,         L"NVIDIA.DLSS",           L"SpoofFeatureSupport"),
     ConfigEntry (nvidia.dlss.streamline_dbg_out,         L"Output Streamline Framework's Debug to game_output.log.",   dll_ini,         L"NVIDIA.DLSS",           L"UseStreamlineDebugLog"),
     ConfigEntry (nvidia.dlss.slop_stop_5000,             L"Prevent DLSS5 from being used.",                            dll_ini,         L"NVIDIA.DLSS",           L"SlopStop5000"),
+    ConfigEntry (nvidia.dlss.force_neural_render,        L"Experimental: Force DLSS5 on after DLSS-SR (D3D12 only).",  dll_ini,         L"NVIDIA.DLSS",           L"ForceNeuralRendering"),
+    ConfigEntry (nvidia.dlss.trace_neural_params,        L"Log the NGX parameters DLSS5 reads (to discover its inputs).",dll_ini,       L"NVIDIA.DLSS",           L"TraceNeuralRenderingParams"),
     ConfigEntry (nvidia.dlss.dlssfg_menu_fps,            L"Framerate Limit to apply in menus in DLSS FG games.",       dll_ini,         L"NVIDIA.DLSS",           L"FrameGenMenuFPS"),
 
     ConfigEntry (render.hdr.enable_32bpc,                L"Experimental - Use 32bpc for HDR",                          dll_ini,         L"SpecialK.HDR",          L"Enable128BitPipeline"),
@@ -5082,6 +5098,10 @@ auto DeclKeybind =
   render.framerate.sleepless_window->load     (config.render.framerate.sleepless_window);
   render.framerate.enable_mmcss->load         (config.render.framerate.enable_mmcss);
   render.framerate.use_amd_mwaitx->load       (config.render.framerate.use_amd_mwaitx);
+  render.framerate.use_intel_tpause->load     (config.render.framerate.use_intel_tpause);
+  render.framerate.adaptive_busy_wait->load   (config.render.framerate.adaptive_busy_wait);
+  render.framerate.defer_low_latency_wait->load
+                                              (config.render.framerate.defer_low_latency_wait);
   render.framerate.apply_streamline_pacing->
                                          load (config.render.framerate.streamline.enable_native_limit);
   render.framerate.streamline_pacing_mode->
@@ -5116,6 +5136,9 @@ auto DeclKeybind =
 
   if (! SK_CPU_HasMWAITX) // Turn off if CPU does not support
     config.render.framerate.use_amd_mwaitx = false;
+
+  if (! SK_CPU_HasWAITPKG)
+    config.render.framerate.use_intel_tpause = false;
 
   __target_fps_now = config.render.framerate.target_fps;
   __target_fps_bg  = config.render.framerate.target_fps_bg;
@@ -5157,6 +5180,10 @@ auto DeclKeybind =
 
   render.framerate.latent_sync.skip_frames
                                       ->load (config.render.framerate.latent_sync.skip_frames);
+  render.framerate.latent_sync.phase_lock
+                                      ->load (config.render.framerate.latent_sync.phase_lock);
+  render.framerate.latent_sync.pi_auto_bias
+                                      ->load (config.render.framerate.latent_sync.pi_auto_bias);
 
   render.osd.draw_in_vidcap->load            (config.render.osd. draw_in_vidcap);
 
@@ -5209,6 +5236,8 @@ auto DeclKeybind =
   nvidia.dlss.spoof_feature_support->load    (config.nvidia.dlss.spoof_support);
   nvidia.dlss.streamline_dbg_out->load       (config.nvidia.dlss.streamline_dbg_out);
   nvidia.dlss.slop_stop_5000->load           (config.nvidia.dlss.slop_stop_5000);
+  nvidia.dlss.force_neural_render->load      (config.nvidia.dlss.force_neural_render);
+  nvidia.dlss.trace_neural_params->load      (config.nvidia.dlss.trace_neural_params);
   nvidia.dlss.dlssfg_menu_fps->load          (config.nvidia.dlss.dlssfg_menu_fps);
 
   render.hdr.enable_32bpc->load              (config.render.hdr.enable_32bpc);
@@ -7517,6 +7546,10 @@ SK_SaveConfig ( std::wstring name,
   render.framerate.sleepless_window->store   (config.render.framerate.sleepless_window);
   render.framerate.enable_mmcss->store       (config.render.framerate.enable_mmcss);
   render.framerate.use_amd_mwaitx->store     (config.render.framerate.use_amd_mwaitx);
+  render.framerate.use_intel_tpause->store   (config.render.framerate.use_intel_tpause);
+  render.framerate.adaptive_busy_wait->store (config.render.framerate.adaptive_busy_wait);
+  render.framerate.defer_low_latency_wait->store
+                                             (config.render.framerate.defer_low_latency_wait);
 
   render.framerate.apply_streamline_pacing->
                                        store (config.render.framerate.streamline.enable_native_limit);
@@ -7615,7 +7648,9 @@ SK_SaveConfig ( std::wstring name,
       render.framerate.latent_sync.auto_bias_target->store (wszPercent);
     }
 
-    render.framerate.latent_sync.skip_frames->store (config.render.framerate.latent_sync.skip_frames);
+    render.framerate.latent_sync.skip_frames->store  (config.render.framerate.latent_sync.skip_frames);
+    render.framerate.latent_sync.phase_lock->store   (config.render.framerate.latent_sync.phase_lock);
+    render.framerate.latent_sync.pi_auto_bias->store (config.render.framerate.latent_sync.pi_auto_bias);
 
     texture.d3d9.clamp_lod_bias->store              (config.textures.clamp_lod_bias);
 
@@ -7677,6 +7712,8 @@ SK_SaveConfig ( std::wstring name,
       nvidia.dlss.spoof_feature_support->store    (config.nvidia.dlss.spoof_support);
       nvidia.dlss.streamline_dbg_out->store       (config.nvidia.dlss.streamline_dbg_out);
       nvidia.dlss.slop_stop_5000->store           (config.nvidia.dlss.slop_stop_5000);
+      nvidia.dlss.force_neural_render->store      (config.nvidia.dlss.force_neural_render);
+      nvidia.dlss.trace_neural_params->store      (config.nvidia.dlss.trace_neural_params);
       nvidia.dlss.dlssfg_menu_fps->store          (config.nvidia.dlss.dlssfg_menu_fps);
       render.framerate.max_delta_time->store      (config.render.framerate.max_delta_time);
       render.framerate.flip_discard->store        (config.render.framerate.flip_discard);

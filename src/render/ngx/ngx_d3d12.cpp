@@ -87,6 +87,19 @@ static NVSDK_NGX_D3D12_ReleaseFeature_pfn
 static NVSDK_NGX_D3D12_GetFeatureRequirements_pfn
        NVSDK_NGX_D3D12_GetFeatureRequirements_Original  = nullptr;
 
+// DLSS 5 (neural rendering) forced on behind a DLSS-SR feature, see
+//   SK_NGX12_EvaluateForcedNeuralRendering (...)
+static struct {
+  const NVSDK_NGX_Handle* sr_handle     = nullptr; // DLSS-SR feature it follows
+  NVSDK_NGX_Handle*       handle        = nullptr;
+  UINT                    eval_failures = 0;
+  bool                    disabled      = false;   // Gave up for this session
+} SK_NGX12_ForcedNR;
+
+// Parameter tracing covers creation and the first few evaluations only
+static constexpr LONG     SK_NGX12_MaxTracedEvaluations = 3;
+static volatile  LONG     SK_NGX12_TracedEvaluations    = 0;
+
 NVSDK_NGX_Result
 NVSDK_CONV
 NVSDK_NGX_D3D12_Init_Detour (unsigned long long InApplicationId, const wchar_t *InApplicationDataPath, ID3D12Device *InDevice, const NVSDK_NGX_FeatureCommonInfo *InFeatureInfo, NVSDK_NGX_Version InSDKVersion)
@@ -317,10 +330,16 @@ NVSDK_NGX_D3D12_CreateFeature_Detour ( ID3D12GraphicsCommandList *InCmdList,
     SK_NGX_DLSS_CreateFeatureOverrideParams (InParameters, InFeatureID);
   }
 
-  NVSDK_NGX_Result ret =
-    NVSDK_NGX_D3D12_CreateFeature_Original ( InCmdList,
-                                             InFeatureID,
-                                             InParameters, OutHandle );
+  NVSDK_NGX_Result ret;
+  {
+    SK_NGX_TraceScope trace ( config.nvidia.dlss.trace_neural_params &&
+                              InFeatureID == NVSDK_NGX_Feature_SlopShading, InFeatureID );
+
+    ret =
+      NVSDK_NGX_D3D12_CreateFeature_Original ( InCmdList,
+                                               InFeatureID,
+                                               InParameters, OutHandle );
+  }
 
   if ( NVSDK_NGX_SUCCEED (ret) ||
        ret == NVSDK_NGX_Result_FAIL_FeatureAlreadyExists )
@@ -417,6 +436,107 @@ NVSDK_NGX_D3D12_CreateFeature_Detour ( ID3D12GraphicsCommandList *InCmdList,
   }
 
   return ret;
+}
+
+NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_D3D12_EvaluateFeature_Detour (ID3D12GraphicsCommandList *InCmdList, const NVSDK_NGX_Handle *InFeatureHandle, const NVSDK_NGX_Parameter *InParameters, PFN_NVSDK_NGX_ProgressCallback InCallback);
+NVSDK_NGX_Result NVSDK_CONV NVSDK_NGX_D3D12_ReleaseFeature_Detour  (NVSDK_NGX_Handle *InHandle);
+
+static void
+SK_NGX12_ReleaseForcedNeuralRendering (void)
+{
+  NVSDK_NGX_Handle* handle =
+    std::exchange (SK_NGX12_ForcedNR.handle, nullptr);
+
+  SK_NGX12_ForcedNR.sr_handle = nullptr;
+
+  if (handle != nullptr)
+    NVSDK_NGX_D3D12_ReleaseFeature_Detour (handle);
+}
+
+//
+// Experimental: runs DLSS 5 (neural rendering) right after a DLSS-SR evaluation
+//   on the same command list, the way community ReShade add-ons do it.
+//
+//   NVIDIA has not published DLSS 5's parameter interface, so the feature is
+//     created and evaluated with the game's DLSS-SR parameter blocks as-is.
+//       If it rejects them, TraceNeuralRenderingParams shows what it reads.
+//
+//   This also runs behind FSR games, because the FSR -> DLSS layer evaluates
+//     DLSS-SR through the same hooked NGX entry point.
+//
+static void
+SK_NGX12_EvaluateForcedNeuralRendering ( ID3D12GraphicsCommandList *pCmdList,
+                                   const NVSDK_NGX_Handle          *pSRHandle,
+                                   const NVSDK_NGX_Parameter       *pEvalParams )
+{
+  if (! config.nvidia.dlss.force_neural_render || config.nvidia.dlss.slop_stop_5000 ||
+                                                  SK_NGX12_ForcedNR.disabled)
+  {
+    return;
+  }
+
+  // The game drives DLSS 5 itself, there is nothing to force
+  for ( const auto& instance : SK_NGX_DLSS12.slop_shading.Instances )
+  {
+    if (instance.second.Handle != nullptr &&
+        instance.second.Handle != SK_NGX12_ForcedNR.handle)
+    {
+      return;
+    }
+  }
+
+  auto pSRInstance =
+    SK_NGX_DLSS12.super_sampling.getInstance (pSRHandle);
+
+  if (pSRInstance == nullptr)
+    return;
+
+  // Follow whichever DLSS-SR feature is currently in use
+  if (SK_NGX12_ForcedNR.handle != nullptr && SK_NGX12_ForcedNR.sr_handle != pSRHandle)
+    SK_NGX12_ReleaseForcedNeuralRendering ();
+
+  if (SK_NGX12_ForcedNR.handle == nullptr)
+  {
+    // Creation parameters (resolution, flags, quality) live in the block used
+    //   to create DLSS-SR; fall back to the evaluation block if it was destroyed.
+    NVSDK_NGX_Parameter* pCreateParams =
+      pSRInstance->Parameters != nullptr ? pSRInstance->Parameters
+                                         : const_cast <NVSDK_NGX_Parameter *> (pEvalParams);
+
+    const NVSDK_NGX_Result ret =
+      NVSDK_NGX_D3D12_CreateFeature_Detour ( pCmdList, NVSDK_NGX_Feature_SlopShading,
+                                               pCreateParams, &SK_NGX12_ForcedNR.handle );
+
+    if (NVSDK_NGX_FAILED (ret))
+    {
+      SK_LOGi0 ( L"Forced DLSS 5 Creation Failed - %x (%ws), disabled for this session.",
+                   ret, GetNGXResultAsString != nullptr ?
+                        GetNGXResultAsString (ret)      : L"Unknown Result" );
+
+      SK_NGX12_ForcedNR.handle   = nullptr;
+      SK_NGX12_ForcedNR.disabled = true;
+
+      return;
+    }
+
+    SK_NGX12_ForcedNR.sr_handle     = pSRHandle;
+    SK_NGX12_ForcedNR.eval_failures = 0;
+
+    SK_LOGi0 (L"Forced DLSS 5 On (following DLSS-SR feature %p)", pSRHandle);
+  }
+
+  const NVSDK_NGX_Result ret =
+    NVSDK_NGX_D3D12_EvaluateFeature_Detour ( pCmdList, SK_NGX12_ForcedNR.handle,
+                                               pEvalParams, nullptr );
+
+  if (NVSDK_NGX_FAILED (ret) && ++SK_NGX12_ForcedNR.eval_failures >= 3)
+  {
+    SK_LOGi0 (L"Forced DLSS 5 keeps failing to evaluate, disabled for this session.");
+
+    SK_NGX12_ReleaseForcedNeuralRendering ();
+
+    SK_NGX12_ForcedNR.disabled = true;
+  }
 }
 
 NVSDK_NGX_Result
@@ -534,11 +654,26 @@ NVSDK_NGX_D3D12_EvaluateFeature_Detour (ID3D12GraphicsCommandList *InCmdList, co
     ((NVSDK_NGX_Parameter *)InParameters)->Set (NVSDK_NGX_Parameter_FrameTimeDeltaInMsec, dFrameTimeDeltaInMsec);
   }
 
-  NVSDK_NGX_Result ret =
-    NVSDK_NGX_D3D12_EvaluateFeature_Original (InCmdList, InFeatureHandle, InParameters, InCallback);
+  const bool bTraceNR =
+    config.nvidia.dlss.trace_neural_params                       &&
+    SK_NGX_DLSS12.slop_shading.hasInstance (InFeatureHandle)     &&
+    InterlockedIncrement (&SK_NGX12_TracedEvaluations) <= SK_NGX12_MaxTracedEvaluations;
+
+  NVSDK_NGX_Result ret;
+  {
+    SK_NGX_TraceScope trace (bTraceNR, NVSDK_NGX_Feature_SlopShading);
+
+    ret =
+      NVSDK_NGX_D3D12_EvaluateFeature_Original (InCmdList, InFeatureHandle, InParameters, InCallback);
+  }
+
+  if (NVSDK_NGX_SUCCEED (ret) && SK_NGX_DLSS12.super_sampling.hasInstance (InFeatureHandle))
+  {
+    SK_NGX12_EvaluateForcedNeuralRendering (InCmdList, InFeatureHandle, InParameters);
+  }
 
   if (NVSDK_NGX_SUCCEED (ret))
-  {                                                  
+  {
     SK_NGX_DLSS12.frame_gen.evaluateFeature          (SK_NGX_DLSS12.frame_gen.getInstance          (InFeatureHandle));
     SK_NGX_DLSS12.super_sampling.evaluateFeature     (SK_NGX_DLSS12.super_sampling.getInstance     (InFeatureHandle));
     SK_NGX_DLSS12.ray_reconstruction.evaluateFeature (SK_NGX_DLSS12.ray_reconstruction.getInstance (InFeatureHandle));
@@ -580,6 +715,10 @@ NVSDK_NGX_D3D12_ReleaseFeature_Detour (NVSDK_NGX_Handle *InHandle)
   SK_LOG_FIRST_CALL
 
   SK_NGX_DLSS12.log_call ();
+
+  // A forced DLSS 5 feature does not outlive the DLSS-SR feature it follows
+  if (InHandle != nullptr && InHandle == SK_NGX12_ForcedNR.sr_handle)
+    SK_NGX12_ReleaseForcedNeuralRendering ();
 
   std::lock_guard
     lock (SK_NGX_Threading->locks.Params);

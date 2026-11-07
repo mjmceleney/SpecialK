@@ -71,6 +71,7 @@ extern uint64_t SK_PerfFreq;
 extern uint32_t SK_PerfFreqInTsc;
 extern uint64_t SK_PerfTicksPerMs;
 extern bool     SK_CPU_HasMWAITX;
+extern bool     SK_CPU_HasWAITPKG;
 
 __forceinline
 LARGE_INTEGER

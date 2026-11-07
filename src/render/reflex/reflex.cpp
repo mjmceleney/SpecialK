@@ -920,29 +920,24 @@ SK_RenderBackend_V2::setLatencyMarkerNV (NV_LATENCY_MARKER_TYPE marker) const no
   {
     // Avert your eyes... time to check if Device and SwapChain are consistent
     //
-    SK_ComPtr <ID3D11Device> pDev11;
-    SK_ComPtr <ID3D12Device> pDev12;
-
-    if      (api == SK_RenderAPI::D3D11)
-                             pDev11 = (ID3D11Device *)device.p;
-    else if (api == SK_RenderAPI::D3D12) 
-                             pDev12 = (ID3D12Device *)device.p;
-    else
+    //   D3D11 / D3D12 need no QueryInterface (device.p is non-null), so skip
+    //     the AddRef/Release churn on this per-marker path.
+    if (api != SK_RenderAPI::D3D11 &&
+        api != SK_RenderAPI::D3D12)
     {
-                    pDev11 = getDevice <ID3D11Device> ();
-      if (! pDev11) pDev12 = getDevice <ID3D12Device> ();
+      if (! (getDevice <ID3D11Device> ().p != nullptr ||
+             getDevice <ID3D12Device> ().p != nullptr))
+        return false; // Uh... what?
     }
-
-    if (! (pDev11 || pDev12))
-      return false; // Uh... what?
 
 #ifdef DEBUG
     SK_ReleaseAssert (SK_ComQIPtr <IDXGISwapChain> (swapchain.p) != nullptr);
 #endif
 
-    SK_ComPtr <IDXGISwapChain1>
-        pSwapChain ((IDXGISwapChain1*)swapchain.p);
-    if (pSwapChain.p != nullptr)
+    // Borrowed reference; the render backend keeps the SwapChain alive
+    auto *pSwapChain =
+      (IDXGISwapChain1 *)swapchain.p;
+    if (pSwapChain != nullptr)
     {
       // This fails in some ReShade setups, we need to write private data to
       //   the SwapChain device and see if reading it back works... but for now,
@@ -966,7 +961,7 @@ SK_RenderBackend_V2::setLatencyMarkerNV (NV_LATENCY_MARKER_TYPE marker) const no
 
     if (marker == RENDERSUBMIT_END)
     {
-      latency.submitQueuedFrame (pSwapChain.p);
+      latency.submitQueuedFrame (pSwapChain);
     }
 
     // Vulkan Early-Out
@@ -984,8 +979,14 @@ SK_RenderBackend_V2::setLatencyMarkerNV (NV_LATENCY_MARKER_TYPE marker) const no
         SK_VK_SetLatencyMarker (vk_marker,             VK_LATENCY_MARKER_INPUT_SAMPLE_NV);
       }
 
+      // Only re-apply when the SwapChain or limit changes; this runs for every marker
+      static IUnknown* pLastLatencyChain = nullptr;
+      static int        iLastLatencySet  = -1;
+
       if (swapchain.p != nullptr &&
-          config.render.framerate.pre_render_limit != -1)
+          config.render.framerate.pre_render_limit != -1 &&
+        ( swapchain.p != pLastLatencyChain ||
+          config.render.framerate.pre_render_limit != iLastLatencySet ))
       {
         SK_ComQIPtr <IDXGISwapChain>
             pChain (      swapchain);
@@ -995,8 +996,12 @@ SK_RenderBackend_V2::setLatencyMarkerNV (NV_LATENCY_MARKER_TYPE marker) const no
           pChain->GetDevice (IID_IDXGIDevice1, (void **)&pDev1.p);
 
           if (pDev1.p != nullptr) {
-              pDev1->SetMaximumFrameLatency (
-                config.render.framerate.pre_render_limit );
+            if (SUCCEEDED (pDev1->SetMaximumFrameLatency (
+                             config.render.framerate.pre_render_limit )))
+            {
+              pLastLatencyChain = swapchain.p;
+              iLastLatencySet   = config.render.framerate.pre_render_limit;
+            }
           }
         }
       }

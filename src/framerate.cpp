@@ -65,6 +65,7 @@ uint64_t                    SK_PerfTicksPerMs = 1ULL;
 uint32_t                    SK_PerfFreqInTsc  = 1UL;
 bool                        SK_TscInvariant   = false;
 bool                        SK_CPU_HasMWAITX  = false;
+bool                        SK_CPU_HasWAITPKG = false;
 SK::Framerate::EventCounter SK::Framerate::events;
 
 float __target_fps      = 0.0;
@@ -112,8 +113,29 @@ SK_AMD_MWAITX (INT64 qpcTarget = 0)
 
   static alignas(64) uint64_t monitor = 0ULL;
 
+  // MWAITX's timer is 32-bit, compute in 64-bit and clamp to avoid wrapping
+  const DWORD dwTscTicks = (qpcTarget > 0) ?
+    static_cast <DWORD> (std::min <uint64_t> (static_cast <uint64_t> (qpcTarget) * SK_PerfFreqInTsc + 1, UINT32_MAX))
+                                           : SK_PerfFreqInTsc;
+
   _mm_monitorx (&monitor, 0, 0);
-  _mm_mwaitx   (0x2, 0, (qpcTarget > 0) ? ((DWORD)qpcTarget * SK_PerfFreqInTsc + 1) : SK_PerfFreqInTsc);
+  _mm_mwaitx   (0x2, 0, dwTscTicks);
+}
+
+__forceinline
+static void
+SK_Intel_TPAUSE (INT64 qpcTarget = 0)
+{
+  if (! config.render.framerate.use_intel_tpause)
+    return YieldProcessor ();
+
+  const uint64_t ullTscTicks = (qpcTarget > 0) ?
+    static_cast <uint64_t> (qpcTarget) * SK_PerfFreqInTsc + 1
+                                               : SK_PerfFreqInTsc;
+
+  // Control = 1 selects C0.1, the lighter of the two states; it has the
+  //   shorter wake-up latency, which matters more for frame pacing.
+  _tpause (1, __rdtsc () + ullTscTicks);
 }
 
 __forceinline
@@ -122,9 +144,13 @@ SK_YieldProcessor (INT64 qpcTarget = 0)
 {
   static const bool bIsCompatibleZen =
     SK_CPU_IsZen () && SK_CPU_HasMWAITX;
+  static const bool bIsCompatibleIntel =
+    (! bIsCompatibleZen) && SK_CPU_HasWAITPKG;
 
   if (bIsCompatibleZen)
     SK_AMD_MWAITX (qpcTarget);
+  else if (bIsCompatibleIntel)
+    SK_Intel_TPAUSE (qpcTarget);
   else YieldProcessor ();
 }
 
@@ -262,24 +288,43 @@ void SK_LatentSync_EndSwap (void) noexcept
     qpcNow.QuadPart
   };
 
-  LONGLONG avg_swaps     = 0LL;
-  LONGLONG sampled_swaps = 0LL;
+  // The statistic spans several seconds of swaps, it does not need to be
+  //   recomputed on every one of them.
+  static constexpr int _RECOMPUTE_INTERVAL = 8;
+
+  if ( (history.total % _RECOMPUTE_INTERVAL) != 0 &&
+        __SK_LatentSyncSwapTime              != 0 )
+  {
+    return;
+  }
+
+  // Use the median rather than the mean; an occasional slow Present (...)
+  //   would otherwise pull the target around and jitter the tear line.
+  static LONGLONG samples [_MAX_SWAPS] = { };
+         int      sampled_swaps        =  0;
 
   for ( const auto& swap : swap_history_s::span (history.records) )
   {
     if ( (qpcNow.QuadPart -
               swap.qpc_sampled) < maxAge )
     {
-      sampled_swaps ++;
-          avg_swaps +=
+      samples [sampled_swaps++] =
               swap.qpc_delta;
     }
   }
 
+  if (sampled_swaps == 0)
+  {
+    __SK_LatentSyncSwapTime = 0;
+    return;
+  }
+
+  std::nth_element ( samples,
+                     samples + sampled_swaps / 2,
+                     samples + sampled_swaps );
+
   __SK_LatentSyncSwapTime =
-                (sampled_swaps > 0) ?
-    (avg_swaps / sampled_swaps)     :
-                 sampled_swaps;
+    samples [sampled_swaps / 2];
 }
 
 
@@ -334,6 +379,201 @@ struct scanline_target_s {
                                if (signals.acquire.isValid ()) ResetEvent (signals.acquire);     }
   } lock;
 } __scanline;
+
+
+// Tracks how late the waitable timer actually wakes threads up on this system,
+//   so the limiter only busy-waits as long as the scheduler's demonstrated
+//     accuracy requires, rather than a fixed fraction of every frame.
+struct SK_Framerate_TimerLateness_s {
+  // Decaying peak (ms): rises immediately on a late wake-up, falls slowly after.
+  //   Starts conservative so the first few seconds behave like the old margin.
+  std::atomic <double> peak_ms = 1.0;
+
+  void record (double late_ms) noexcept
+  {
+    late_ms =
+      std::max (0.0, late_ms);
+
+    const double peak =
+      peak_ms.load (std::memory_order_relaxed);
+
+    peak_ms.store ( late_ms > peak ? late_ms
+                                   : peak * 0.995 + late_ms * 0.005,
+                      std::memory_order_relaxed );
+  }
+
+  double getMarginMs (void) const noexcept
+  {
+    // 10% headroom above the observed peak, plus a 50 us safety floor
+    return
+      peak_ms.load (std::memory_order_relaxed) * 1.1 + 0.05;
+  }
+} static SK_Framerate_TimerLateness;
+
+// How long (in 100 ns units) to sleep on a waitable timer before busy-waiting
+//   out the remainder of to_next_in_secs.
+static LONGLONG
+SK_Framerate_GetTimerSleep100ns (double to_next_in_secs) noexcept
+{
+  const double to_next_in_ms =
+    to_next_in_secs * 1000.0;
+
+  // User-tunable busy-wait heuristic (energy presets / sliders)
+  double sleep_ms =
+    std::min ( to_next_in_ms - SK::Framerate::Limiter::timer_res_ms * fSwapWaitRatio,
+               to_next_in_ms * fSwapWaitFract );
+
+  // Never sleep less than the heuristic would, only more when the measured
+  //   timer accuracy allows it. A busy-wait fraction of 100% (fSwapWaitFract
+  //     == 0) is an explicit request for maximum precision, so honor it.
+  if (config.render.framerate.adaptive_busy_wait && fSwapWaitFract > 0.0f)
+  {
+    sleep_ms =
+      std::max (sleep_ms, to_next_in_ms - SK_Framerate_TimerLateness.getMarginMs ());
+  }
+
+  // Keep sub-millisecond precision, the timer is specified in 100 ns units
+  return
+    static_cast <LONGLONG> (std::max (0.0, sleep_ms) * 10000.0);
+}
+
+
+// Keeps Latent Sync's schedule aligned with the display's actual refresh by
+//   measuring the scan position once per-frame, rather than free-running on
+//     QPC (which drifts by some ppm relative to the display) between periodic
+//       hard resyncs that visibly snap the tear line back into place.
+struct SK_LatentSync_PhaseLock_s {
+  static constexpr int    _CalibrationFrames =     16;
+  static constexpr int    _MaxOutliers       =     30;
+  static constexpr double _Kp                =   0.05; // Phase correction gain
+  static constexpr double _Ki                =  0.002; // Frequency correction gain
+  static constexpr double _MaxFreqError      = 0.0005; // 500 ppm of refresh
+
+  double ref_phase   = 0.0; // Schedule phase relative to scanout (QPC ticks)
+  double calib_error = 0.0;
+  double freq_adj    = 0.0; // Integral term, QPC ticks per-frame
+  double carry       = 0.0; // Sub-tick remainder of corrections
+  int    samples     =   0;
+  int    outliers    =   0;
+  bool   locked      = false;
+  bool   lost        = false;
+
+  void reset (void) noexcept { *this = { }; }
+
+  static double wrap (double ticks, double period) noexcept
+  {
+    ticks = fmod (ticks, period);
+
+    if (ticks <  -period / 2.0) ticks += period;
+    if (ticks >=  period / 2.0) ticks -= period;
+
+    return ticks;
+  }
+
+  // Returns the number of QPC ticks to move the limiter's schedule earlier by
+  LONGLONG update ( SK_RenderBackend& rb,
+                    LONGLONG          llScheduledQPC,
+                    LONGLONG          ticks_per_refresh,
+                    LONGLONG          ticks_per_scanline ) noexcept
+  {
+    if (D3DKMTGetScanLine == nullptr || ticks_per_refresh <= 1 || ticks_per_scanline <= 0)
+      return 0;
+
+    // Never stall the limiter waiting on the resync thread
+    std::unique_lock <std::mutex>
+        adapter_lock (rb.adapter.lock, std::try_to_lock);
+
+    if ((! adapter_lock.owns_lock ()) || rb.adapter.d3dkmt == 0)
+      return 0;
+
+    D3DKMT_GETSCANLINE
+      getScanLine               = { };
+      getScanLine.hAdapter      = rb.adapter.d3dkmt;
+      getScanLine.VidPnSourceId = rb.adapter.VidPnSourceId;
+
+    const LONGLONG qpc_t0 = SK_QueryPerf ().QuadPart;
+
+    if ( STATUS_SUCCESS !=
+           ((D3DKMTGetScanLine_pfn)D3DKMTGetScanLine)(&getScanLine) )
+      return 0;
+
+    const LONGLONG qpc_t1 = SK_QueryPerf ().QuadPart;
+
+    // Discard samples where the call itself took too long to be accurate
+    if (qpc_t1 - qpc_t0 > ticks_per_scanline * 4)
+      return 0;
+
+    const double period =
+      static_cast <double> (ticks_per_refresh);
+
+    // When the current refresh began scanning out
+    const double scanout_origin =
+      static_cast <double> (qpc_t0 + qpc_t1) / 2.0 -
+      static_cast <double> (getScanLine.ScanLine) * static_cast <double> (ticks_per_scanline);
+
+    const double phase =
+      wrap (static_cast <double> (llScheduledQPC) - scanout_origin, period);
+
+    // Establish the reference phase from the first frames after a resync
+    if (! locked)
+    {
+      if (samples++ == 0)
+      {
+        ref_phase = phase;
+      }
+
+      else
+      {
+        calib_error += wrap (phase - ref_phase, period);
+
+        if (samples == _CalibrationFrames)
+        {
+          ref_phase = wrap (ref_phase + calib_error / (_CalibrationFrames - 1), period);
+          locked    = true;
+        }
+      }
+
+      return 0;
+    }
+
+    const double error =
+      wrap (phase - ref_phase, period);
+
+    // Drift is well under a scanline per-frame; anything large is a bad
+    //   sample or a real discontinuity (mode change, long stall, etc.)
+    const double outlier_threshold =
+      std::max (static_cast <double> (ticks_per_scanline) * 8.0, period * 0.02);
+
+    if (std::abs (error) > outlier_threshold)
+    {
+      if (++outliers > _MaxOutliers)
+        lost = true;
+
+      return 0;
+    }
+
+    outliers = 0;
+
+    freq_adj =
+      std::clamp ( freq_adj + _Ki * error,
+                    -period * _MaxFreqError,
+                     period * _MaxFreqError );
+
+    // Limit each frame's correction so it can never produce a visible hitch
+    const double max_step =
+      static_cast <double> (ticks_per_scanline) * 2.0;
+
+    carry +=
+      std::clamp (_Kp * error + freq_adj, -max_step, max_step);
+
+    const LONGLONG llCorrection =
+      static_cast <LONGLONG> (carry);
+
+    carry -= static_cast <double> (llCorrection);
+
+    return llCorrection;
+  }
+} static SK_LatentSync_PhaseLock;
 
 
 bool
@@ -907,6 +1147,21 @@ SK_ImGui_LatentSyncConfig (void)
 
       if (config.render.framerate.latent_sync.auto_bias)
       {
+        ImGui::SameLine ();
+
+        if (ImGui::Checkbox ("PI Controller", &config.render.framerate.latent_sync.pi_auto_bias))
+        {
+          config.utility.save_async ();
+        }
+
+        ImGui::SetItemTooltip (
+          "Adjust Auto Bias with a proportional-integral controller, which settles faster and\n"
+          "hunts less than the original step-based adjustment."
+        );
+      }
+
+      if (config.render.framerate.latent_sync.auto_bias)
+      {
         bool         bTargetInputInMs        =
           ( config.render.framerate.latent_sync.auto_bias_target.percent <= 0.0f );
 
@@ -1366,6 +1621,40 @@ SK_ImGui_LatentSyncConfig (void)
 
       if (bAdvanced)
       {
+        if (ImGui::Checkbox ("Phase Lock", &config.render.framerate.latent_sync.phase_lock))
+        {
+          config.utility.save_async ();
+        }
+
+        ImGui::SetItemTooltip (
+          "Continuously track the display's refresh to hold the tear line in place,\n"
+          "instead of drifting between periodic resyncs that snap it back.\n\n"
+          "Applies when the framerate is the refresh rate or an integer divisor of it."
+        );
+
+        if (config.render.framerate.latent_sync.phase_lock)
+        {
+          const double dTicksPerRefresh =
+            ( pDisplay->signal.timing.vsync_freq.Numerator > 0 ) ?
+              static_cast <double> (pDisplay->signal.timing.vsync_freq.Denominator * SK_PerfFreq) /
+              static_cast <double> (pDisplay->signal.timing.vsync_freq.Numerator)  : 0.0;
+
+          if (SK_LatentSync_PhaseLock.locked && dTicksPerRefresh > 0.0)
+          {
+            ImGui::SameLine     ();
+            ImGui::TextDisabled ( "Locked (%+.1f ppm)",
+              1.0e6 * SK_LatentSync_PhaseLock.freq_adj / dTicksPerRefresh );
+          }
+
+          else
+          {
+            ImGui::SameLine     ();
+            ImGui::TextDisabled ("Not Locked");
+          }
+
+          ImGui::SetItemTooltip ("Frequency correction applied to keep the schedule aligned with the display.");
+        }
+
         static bool bResyncRateInSeconds =
           ( config.render.framerate.latent_sync.scanline_resync >= 0 );
 
@@ -2363,8 +2652,16 @@ SK::Framerate::Limiter::wait (void) noexcept
 
 
 
-  if (ZwSetTimerResolution_Original != nullptr && config.render.framerate.max_timer_resolution)
+  // Querying (and, while in the background on Windows 11, failing to set) the
+  //   timer resolution is a pair of syscalls; there's no need to do it per-frame.
+  static DWORD dwLastTimerResCheck = 0;
+  const  DWORD dwTimerResCheckNow  = SK_timeGetTime ();
+
+  if ( ZwSetTimerResolution_Original != nullptr && config.render.framerate.max_timer_resolution &&
+       dwTimerResCheckNow - dwLastTimerResCheck >= 250 )
   {
+    dwLastTimerResCheck = dwTimerResCheckNow;
+
     ULONG                         min,  max,  cur;
     if ( ZwQueryTimerResolution (&min, &max, &cur) ==
            STATUS_SUCCESS )
@@ -2494,6 +2791,10 @@ SK::Framerate::Limiter::wait (void) noexcept
     normal         = false;
 
     WriteRelease64 (&frames, 0);
+
+    // The schedule's phase just changed, the PLL must establish a new reference
+    if (tracks_window)
+      SK_LatentSync_PhaseLock.reset ();
   }
 
   WriteRelease64         (&time,  _time);
@@ -2589,6 +2890,11 @@ SK::Framerate::Limiter::wait (void) noexcept
             0.0  );
     };
 
+  // Latent Sync's scheduled time for this frame, before Present (...) duration
+  //   compensation is applied; the phase-locked loop tracks this.
+  LONG64 llLatentSyncSchedule = 0;
+  bool   bLatentSyncResynced  = false;
+
   if (next_ > 0LL)
   {
     // Flush batched commands before zonking this thread off
@@ -2641,19 +2947,18 @@ SK::Framerate::Limiter::wait (void) noexcept
     //   wait time without completely gobbling up a CPU core.
     if ( timer_wait.isValid () && (to_next_in_secs * 1000.0 >= timer_res_ms * 2.875) )
     {
-      // Schedule the wait period just shy of the timer resolution determined
-      //   by NtQueryTimerResolution (...). Excess wait time will be handled by
-      //     spinning, because the OS scheduler is not accurate enough.
-      const double dDelayMs =
-        std::max ( 0.0,
-          std::min ( to_next_in_secs * 1000.0 - timer_res_ms * fSwapWaitRatio,
-                     to_next_in_secs * 1000.0 * fSwapWaitFract ) );
+      // Schedule the wait period just shy of the deadline, excess wait time
+      //   will be handled by spinning, because the OS scheduler is not
+      //     accurate enough. See SK_Framerate_GetTimerSleep100ns (...).
+      const LONGLONG llSleep100ns =
+        SK_Framerate_GetTimerSleep100ns (to_next_in_secs);
 
-      // Negative = relative due time, in 100 ns units
       LARGE_INTEGER
-        liDelay
-          { .QuadPart =
-              -static_cast <LONGLONG> (dDelayMs * 10000.0) };
+        liDelay { .QuadPart = -llSleep100ns };
+
+      // When the timer is due to fire, to measure how late it actually wakes us
+      const LONGLONG qpcTimerDue =
+        SK_QueryPerf ().QuadPart + (llSleep100ns * static_cast <LONGLONG> (SK_PerfFreq)) / 10000000LL;
 
       // Check if the next frame is sooner than waitable timer resolution before
       //   rescheduling this thread.
@@ -2725,6 +3030,15 @@ SK::Framerate::Limiter::wait (void) noexcept
             dll_log->Log (
               L"[(%s)-%s:%d] Result of WaitForSingleObject = %x (GetLastError: %x)",
                      __FUNCTIONW__, __FILEW__, __LINE__, dwWait,  dwLastError
+            );
+          }
+
+          // Only a wait on the timer alone measures the timer's accuracy
+          if (dwWait == WAIT_OBJECT_0 && iWaitObjs == 1 && hWaitObjs [0] == timer_wait.m_h)
+          {
+            SK_Framerate_TimerLateness.record (
+              1000.0 * static_cast <double> (SK_QueryPerf ().QuadPart - qpcTimerDue) /
+                       static_cast <double> (SK_PerfFreq)
             );
           }
 
@@ -4017,6 +4331,9 @@ SK::Framerate::Limiter::wait (void) noexcept
 
           __scanline.lock.acquired = true;
           __scanline.lock.resetSignals ();
+
+          bLatentSyncResynced = true;
+          SK_LatentSync_PhaseLock.reset ();
         }
       }
 
@@ -4080,7 +4397,31 @@ SK::Framerate::Limiter::wait (void) noexcept
           );
         }
 
-        if (latency_avg.getInput () > (auto_bias_target_ms * 1.05f))
+        if (config.render.framerate.latent_sync.pi_auto_bias)
+        {
+          // PI controller (velocity form) on the error between measured idle
+          //   time and the target, normalized to the frame interval. Raising the
+          //     bias delays the game after Present (...), lowering idle time, so
+          //       too much idle time (positive error) raises the bias.
+          static constexpr double _Kp = 0.05,
+                                  _Ki = 0.02;
+
+          static double dLastError = 0.0;
+
+          double dError =
+            (latency_avg.getInput () - auto_bias_target_ms) / (1000.0 / get_limit ());
+
+          // Missing the deadline is worse than a little extra latency, back off faster
+          if (dError < 0.0)
+              dError *= 2.0;
+
+          config.render.framerate.latent_sync.delay_bias +=
+            static_cast <float> (_Kp * (dError - dLastError) + _Ki * dError);
+
+          dLastError = dError;
+        }
+
+        else if (latency_avg.getInput () > (auto_bias_target_ms * 1.05f))
         {
           delta = (float)effective_frametime () * SK_LatentSyncDeltaMultiplier;
 
@@ -4114,6 +4455,8 @@ SK::Framerate::Limiter::wait (void) noexcept
       }
 
       __SK_LatentSyncFrame++;
+
+      llLatentSyncSchedule = next_;
 
       next_ -=
         (__SK_LatentSyncSwapTime / 2);
@@ -4170,6 +4513,48 @@ SK::Framerate::Limiter::wait (void) noexcept
 
     static bool bSync = true; // First time signals resync
 
+    // The phase-locked loop only applies when every frame lands on the same
+    //   point of the refresh cycle: framerate is the refresh rate or an integer
+    //     divisor of it, without frame skipping or VRR.
+    const double dRefreshesPerFrame =
+      ( ticks_per_refresh > 1 && fps > 0.0 ) ?
+        ( static_cast <double> (SK_PerfFreq) / fps ) /
+          static_cast <double> (ticks_per_refresh)  : 0.0;
+
+    const bool bPhaseLockApplies =
+      config.render.framerate.latent_sync.phase_lock &&
+      tracks_window                                  &&
+      __scanline.lock.acquired                       &&
+      __SK_LatentSyncSkip  == 0                      &&
+      (! rb.gsync_state.active)                      &&
+      dRefreshesPerFrame   >= 0.5                    &&
+      std::abs (dRefreshesPerFrame - std::round (dRefreshesPerFrame)) <
+        SK_LatentSync_PhaseLock_s::_MaxFreqError * std::round (dRefreshesPerFrame);
+
+    if (! bPhaseLockApplies)
+    {
+      SK_LatentSync_PhaseLock.reset ();
+    }
+
+    else if (llLatentSyncSchedule != 0 && (! bLatentSyncResynced))
+    {
+      const LONGLONG llCorrection =
+        SK_LatentSync_PhaseLock.update ( SK_GetCurrentRenderBackend (),
+                                           llLatentSyncSchedule,
+                                             ticks_per_refresh,
+                                               ticks_per_scanline );
+
+      if (llCorrection != 0)
+        InterlockedAdd64 (&start, -llCorrection);
+
+      // Lost track of the display, fall back to a full scanline resync
+      if (SK_LatentSync_PhaseLock.lost)
+      {
+        SK_LatentSync_PhaseLock.reset ();
+        bSync = true;
+      }
+    }
+
     if (config.render.framerate.latent_sync.scanline_resync != 0)
     {
       static int
@@ -4210,7 +4595,9 @@ SK::Framerate::Limiter::wait (void) noexcept
         iSync = iResync;
       }
 
-      if (iSync >= iResync)
+      // While the phase-locked loop holds the display, periodic resyncs would
+      //   only cause needless snaps; it requests one itself if it loses lock.
+      if (iSync >= iResync && (! SK_LatentSync_PhaseLock.locked))
       {
         bSync = true;
 
@@ -5023,19 +5410,18 @@ SK_Framerate_WaitUntilQPC (LONGLONG llQPC, HANDLE& hTimer) noexcept
   //   wait time without completely gobbling up a CPU core.
   if ( (LONG_PTR)hTimer > 0 && (to_next_in_secs * 1000.0 >= SK::Framerate::Limiter::timer_res_ms * 2.875) )
   {
-    // Schedule the wait period just shy of the timer resolution determined
-    //   by NtQueryTimerResolution (...). Excess wait time will be handled by
-    //     spinning, because the OS scheduler is not accurate enough.
-    const double dDelayMs =
-      std::max ( 0.0,
-        std::min ( to_next_in_secs * 1000.0 - SK::Framerate::Limiter::timer_res_ms * fSwapWaitRatio,
-                   to_next_in_secs * 1000.0 * fSwapWaitFract ) );
+    // Schedule the wait period just shy of the deadline, excess wait time
+    //   will be handled by spinning, because the OS scheduler is not
+    //     accurate enough. See SK_Framerate_GetTimerSleep100ns (...).
+    const LONGLONG llSleep100ns =
+      SK_Framerate_GetTimerSleep100ns (to_next_in_secs);
 
-    // Negative = relative due time, in 100 ns units
     LARGE_INTEGER
-      liDelay
-        { .QuadPart =
-            -static_cast <LONGLONG> (dDelayMs * 10000.0) };
+      liDelay { .QuadPart = -llSleep100ns };
+
+    // When the timer is due to fire, to measure how late it actually wakes us
+    const LONGLONG qpcTimerDue =
+      SK_QueryPerf ().QuadPart + (llSleep100ns * static_cast <LONGLONG> (SK_PerfFreq)) / 10000000LL;
 
     // Check if the next frame is sooner than waitable timer resolution before
     //   rescheduling this thread.
@@ -5060,6 +5446,14 @@ SK_Framerate_WaitUntilQPC (LONGLONG llQPC, HANDLE& hTimer) noexcept
 
         DWORD dwWait =
           SK_WaitForSingleObject_Micro (hTimer, &liDelay);
+
+        if (dwWait == WAIT_OBJECT_0)
+        {
+          SK_Framerate_TimerLateness.record (
+            1000.0 * static_cast <double> (SK_QueryPerf ().QuadPart - qpcTimerDue) /
+                     static_cast <double> (SK_PerfFreq)
+          );
+        }
 
         wait_time.endSleep ();
 
@@ -5240,6 +5634,26 @@ SK_Framerate_EnergyControlPanel (void)
       ImGui::EndGroup     ();
     }
 
+    ImGui::Spacing  ();
+    ImGui::SameLine ();
+
+    if (ImGui::Checkbox ("Adaptive Busy-Wait", &config.render.framerate.adaptive_busy_wait))
+    {
+      config.utility.save_async ();
+    }
+
+    ImGui::SetItemTooltip (
+      "Sleep for as much of each frame as this system's measured timer accuracy allows,\n"
+      "busy-waiting only for the remainder. Never busy-waits more than the settings above.\n\n"
+      "Has no effect with a Busy-Wait %% of 100 (Max. Accuracy)."
+    );
+
+    if (config.render.framerate.adaptive_busy_wait && fSwapWaitFract > 0.0f)
+    {
+      ImGui::SameLine     ();
+      ImGui::TextDisabled ("Margin: %.3f ms", SK_Framerate_TimerLateness.getMarginMs ());
+    }
+
     if (preset_changed)
     {
       config.render.framerate.busy_wait_minimum = (1.0f - fSwapWaitFract) * 100.0f;
@@ -5285,6 +5699,31 @@ SK_Framerate_EnergyControlPanel (void)
 
       SK_ImGui_DrawCPUTemperature ();
       SK_ImGui_DrawCPUPower       ();
+    }
+
+    else if (SK_CPU_HasWAITPKG)
+    {
+      ImGui::SameLine    ();
+      ImGui::SeparatorEx (ImGuiSeparatorFlags_Vertical);
+      ImGui::SameLine    ();
+
+      bool bUseIntelTPAUSE =
+        config.render.framerate.use_intel_tpause;
+
+      if (ImGui::Checkbox ("Use Intel TPAUSE Instructions", &bUseIntelTPAUSE))
+      {
+        config.render.framerate.use_intel_tpause = bUseIntelTPAUSE;
+      }
+
+      if (ImGui::IsItemHovered ())
+      {
+        ImGui::BeginTooltip ();
+        ImGui::Text         ("Power Saving Feature For Intel CPUs");
+        ImGui::Separator    ();
+        ImGui::BulletText   ("Uses a more efficient busy-wait that increases frametime variance but reduces power.");
+        ImGui::BulletText   ("Only affects busy-wait power consumption and has no impact on OS reported CPU load%.");
+        ImGui::EndTooltip   ();
+      }
     }
 
     ImGui::TreePop    ();
